@@ -1,0 +1,730 @@
+// PoC-2: how many dynamic box colliders can this engine hold, and what does
+// every extra box cost per frame? Injected into physics_RT; driven by env vars.
+//
+//   BALLANCE_POC2_COUNT      boxes to spawn (0 = measure only, default 0)
+//   BALLANCE_POC2_DELAY      seconds to wait before spawning (default 8)
+//   BALLANCE_POC2_SIZE       edge length of a box, world units (default 4.0)
+//   BALLANCE_POC2_DIR        where to write the csv (default /tmp/poc2)
+//   BALLANCE_POC2_TAG        csv file suffix (default "run")
+//
+// Boxes are static (fixed=TRUE) and carry no faces: this measures the physics
+// side only, rendering of the blocks is a separate (GPU) question.
+#include "CKAll.h"
+#include "CKIpionManager.h"
+#include "Poc2Obstacles.h"
+
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+
+namespace {
+
+int EnvInt(const char *name, int fallback)
+{
+    const char *v = std::getenv(name);
+    if (!v || !*v)
+        return fallback;
+    return std::atoi(v);
+}
+
+double EnvDouble(const char *name, double fallback)
+{
+    const char *v = std::getenv(name);
+    if (!v || !*v)
+        return fallback;
+    return std::atof(v);
+}
+
+std::string EnvText(const char *name, const char *fallback)
+{
+    const char *v = std::getenv(name);
+    return std::string((v && *v) ? v : fallback);
+}
+
+struct Poc2State
+{
+    bool started = false;
+    bool spawnTried = false;
+    int target = 0;
+    int created = 0;
+    long frame = 0;
+    long spawnFrame = -1;
+    double startMs = 0.0;
+    double lastFrameMs = 0.0;
+    double spawnMs = 0.0;
+    double frameMs = 0.0;
+    double delay = 8.0;
+    double size = 4.0;
+    FILE *csv = NULL;
+    CKMesh *mesh = NULL;
+    CK3dEntity *ball = NULL;
+};
+
+Poc2State g;
+
+// Place the lattice relative to the player ball: the first mov* object in the
+// environment is the ball in a normal Ballance level. Everything sits 12 units
+// above it so a spawn never shoves the ball through the floor.
+void SpawnBlocks(CKIpionManager *man, CKContext *ctx, int count)
+{
+    CKLevel *level = ctx->GetCurrentLevel();
+    if (!level || count <= 0)
+        return;
+
+    VxVector center(0.0f, 0.0f, 0.0f);
+    if (man->m_MovableObjects.len() > 0)
+    {
+        IVP_Real_Object *ro = man->m_MovableObjects.element_at(0);
+        if (ro && ro->get_core())
+        {
+            const IVP_U_Point *p = ro->get_core()->get_position_PSI();
+            center.Set((float)p->k[0], (float)(p->k[1] + 12.0), (float)p->k[2]);
+        }
+    }
+
+    const float size = (float)g.size;
+    const float half = size * 0.5f;
+    if (!g.mesh)
+    {
+        g.mesh = (CKMesh *)ctx->CreateObject(CKCID_MESH, "Poc2BlockMesh");
+        if (!g.mesh)
+            return;
+        g.mesh->SetVertexCount(8);
+        for (int i = 0; i < 8; ++i)
+        {
+            VxVector v(((i & 1) ? half : -half), ((i & 2) ? half : -half), ((i & 4) ? half : -half));
+            g.mesh->SetVertexPosition(i, &v);
+        }
+        g.mesh->SetFaceCount(0); // no faces: invisible, geometry only feeds the hull
+    }
+
+    const int side = (int)std::ceil(std::cbrt((double)count));
+    const double t0 = Poc2NowMs();
+    int made = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        const int ix = i % side;
+        const int iy = (i / side) % side;
+        const int iz = i / (side * side);
+        const float x = center.x + ((float)ix - (side - 1) * 0.5f) * size;
+        const float y = center.y + ((float)iy - (side - 1) * 0.5f) * size;
+        const float z = center.z + ((float)iz - (side - 1) * 0.5f) * size;
+
+        char name[48];
+        std::snprintf(name, sizeof(name), "Poc2Block%05d", i);
+        CK3dEntity *ent = (CK3dEntity *)ctx->CreateObject(CKCID_3DOBJECT, name);
+        if (!ent)
+            continue;
+        ent->SetCurrentMesh(g.mesh);
+        ent->SetPosition3f(x, y, z);
+        level->AddObject(ent);
+
+        IVP_Material *material = new IVP_Material_Simple(0.6, 0.3);
+        // One named collision surface is shared by every box of the same size.
+        int ret = man->CreatePhysicsObjectOnParameters(ent, 1, &g.mesh, 0, NULL, NULL, 0, NULL, 1.0f,
+                                                      "poc2-block", NULL, TRUE, material, 1.0f,
+                                                      (CKSTRING) "", FALSE, TRUE, FALSE, 0.1f, 0.1f);
+        if (ret == CK_OK)
+        {
+            man->OwnMaterial(ent, material);
+            ++made;
+        }
+        else
+        {
+            delete material;
+        }
+    }
+    g.spawnMs = Poc2NowMs() - t0;
+    g.created = made;
+    g.spawnFrame = g.frame;
+
+    CKSTRING levelName = level->GetName();
+    std::printf("[poc2] spawned %d/%d boxes in %.1f ms (level=%s, movable=%d)\n", made, count, g.spawnMs,
+                levelName ? levelName : "?", man->m_MovableObjects.len());
+}
+
+// One-shot census of the level the game is currently running: class counts and
+// object names. Needed to find the script that starts a real level, because the
+// menu level has no physics objects at all.
+void DumpLevel(CKContext *ctx)
+{
+    CKLevel *level = ctx->GetCurrentLevel();
+    if (!level)
+    {
+        std::printf("[poc2] dump: no current level\n");
+        return;
+    }
+    std::printf("[poc2] dump level=%s\n", level->GetName() ? level->GetName() : "?");
+    const CK_CLASSID classes[] = {CKCID_BEHAVIOR, CKCID_3DOBJECT, CKCID_CAMERA, CKCID_LIGHT, CKCID_MESH, CKCID_GROUP};
+    const char *labels[] = {"behavior", "3dobject", "camera", "light", "mesh", "group"};
+    for (int c = 0; c < 6; ++c)
+    {
+        const XObjectPointerArray &arr = level->ComputeObjectList(classes[c]);
+        std::printf("[poc2] dump %s=%d\n", labels[c], arr.Size());
+        int i = 0;
+        for (CKObject **it = arr.Begin(); it != arr.End() && i < 300; ++it, ++i)
+        {
+            CKObject *o = *it;
+            if (!o)
+                continue;
+            std::printf("[poc2] dump   %s %s\n", labels[c], o->GetName() ? o->GetName() : "?");
+        }
+    }
+    std::fflush(stdout);
+}
+
+void DumpGraph(CKContext *ctx)
+{
+    CKLevel *level = ctx->GetCurrentLevel();
+    if (!level)
+        return;
+
+    const XObjectPointerArray &behaviors = level->ComputeObjectList(CKCID_BEHAVIOR);
+    std::printf("[poc2] graph behaviors=%d\n", behaviors.Size());
+    for (CKObject **it = behaviors.Begin(); it != behaviors.End(); ++it)
+    {
+        CKBehavior *b = (CKBehavior *)(*it);
+        if (!b)
+            continue;
+        const char *name = b->GetName() ? b->GetName() : "?";
+        std::printf("[poc2] beh %s in=%d out=%d sub=%d lp=%d\n", name, b->GetInputCount(), b->GetOutputCount(),
+                    b->GetSubBehaviorCount(), b->GetLocalParameterCount());
+        for (int i = 0; i < b->GetInputCount(); ++i)
+        {
+            CKBehaviorIO *io = b->GetInput(i);
+            std::printf("[poc2]   in%d %s\n", i, (io && io->GetName()) ? io->GetName() : "?");
+        }
+        for (int i = 0; i < b->GetOutputCount(); ++i)
+        {
+            CKBehaviorIO *io = b->GetOutput(i);
+            std::printf("[poc2]   out%d %s\n", i, (io && io->GetName()) ? io->GetName() : "?");
+        }
+        for (int i = 0; i < b->GetLocalParameterCount(); ++i)
+        {
+            CKParameterLocal *p = b->GetLocalParameter(i);
+            if (!p)
+                continue;
+            char text[256] = {0};
+            int intValue = 0;
+            float floatValue = 0.0f;
+            const char *kind = "?";
+            CKGUID cid = p->GetGUID();
+            if (cid == CKPGUID_INT)
+            {
+                p->GetValue(&intValue, FALSE);
+                kind = "int";
+                std::snprintf(text, sizeof(text), "%d", intValue);
+            }
+            else if (cid == CKPGUID_FLOAT)
+            {
+                p->GetValue(&floatValue, FALSE);
+                kind = "float";
+                std::snprintf(text, sizeof(text), "%.3f", floatValue);
+            }
+            else if (cid == CKPGUID_STRING)
+            {
+                p->GetStringValue(text, FALSE);
+                kind = "string";
+            }
+            else
+            {
+                std::snprintf(text, sizeof(text), "guid=%08x:%08x", (unsigned)cid.d1, (unsigned)cid.d2);
+            }
+            std::printf("[poc2]   lp%d %s (%s) = %s\n", i, p->GetName() ? p->GetName() : "?", kind, text);
+        }
+    }
+
+    const XObjectPointerArray &links = level->ComputeObjectList(CKCID_BEHAVIORLINK);
+    std::printf("[poc2] graph links=%d\n", links.Size());
+    for (CKObject **it = links.Begin(); it != links.End(); ++it)
+    {
+        CKBehaviorLink *l = (CKBehaviorLink *)(*it);
+        if (!l)
+            continue;
+        CKBehaviorIO *in = l->GetInBehaviorIO();
+        CKBehaviorIO *out = l->GetOutBehaviorIO();
+        CKBehavior *src = out ? out->GetOwner() : NULL;
+        CKBehavior *dst = in ? in->GetOwner() : NULL;
+        int srcIndex = -1, dstIndex = -1;
+        if (src && out)
+            for (int i = 0; i < src->GetOutputCount(); ++i)
+                if (src->GetOutput(i) == out)
+                    srcIndex = i;
+        if (dst && in)
+            for (int i = 0; i < dst->GetInputCount(); ++i)
+                if (dst->GetInput(i) == in)
+                    dstIndex = i;
+        std::printf("[poc2] link %s#%d -> %s#%d delay=%d\n", (src && src->GetName()) ? src->GetName() : "?", srcIndex,
+                    (dst && dst->GetName()) ? dst->GetName() : "?", dstIndex, l->GetActivationDelay());
+    }
+    std::fflush(stdout);
+}
+
+void DumpTree(CKBehavior *b, int depth)
+{
+    if (!b || depth > 4)
+        return;
+    char pad[32];
+    int n = depth * 2;
+    if (n > 30)
+        n = 30;
+    for (int i = 0; i < n; ++i)
+        pad[i] = ' ';
+    pad[n] = 0;
+
+    std::printf("[poc2] tree %s%s in=%d out=%d sub=%d\n", pad, b->GetName() ? b->GetName() : "?", b->GetInputCount(),
+                b->GetOutputCount(), b->GetSubBehaviorCount());
+    for (int i = 0; i < b->GetLocalParameterCount(); ++i)
+    {
+        CKParameterLocal *p = b->GetLocalParameter(i);
+        if (!p)
+            continue;
+        CKGUID g = p->GetGUID();
+        char text[256] = {0};
+        if (g == CKPGUID_STRING)
+            p->GetStringValue(text, FALSE);
+        else if (g == CKPGUID_INT)
+        {
+            int v = 0;
+            p->GetValue(&v, FALSE);
+            std::snprintf(text, sizeof(text), "%d", v);
+        }
+        else if (g == CKPGUID_FLOAT)
+        {
+            float v = 0.0f;
+            p->GetValue(&v, FALSE);
+            std::snprintf(text, sizeof(text), "%.3f", v);
+        }
+        else
+            continue;
+        if (!text[0])
+            continue;
+        std::printf("[poc2] tree %s  lp%d %s = %s\n", pad, i, p->GetName() ? p->GetName() : "?", text);
+    }
+
+    for (int i = 0; i < b->GetSubBehaviorCount(); ++i)
+        DumpTree(b->GetSubBehavior(i), depth + 1);
+
+    for (int i = 0; i < b->GetSubBehaviorLinkCount(); ++i)
+    {
+        CKBehaviorLink *l = b->GetSubBehaviorLink(i);
+        if (!l)
+            continue;
+        CKBehaviorIO *in = l->GetInBehaviorIO();
+        CKBehaviorIO *out = l->GetOutBehaviorIO();
+        CKBehavior *src = out ? out->GetOwner() : NULL;
+        CKBehavior *dst = in ? in->GetOwner() : NULL;
+        std::printf("[poc2] tree %s  link %s -> %s (delay %d)\n", pad,
+                    (src && src->GetName()) ? src->GetName() : "?",
+                    (dst && dst->GetName()) ? dst->GetName() : "?", l->GetActivationDelay());
+    }
+    std::fflush(stdout);
+}
+
+
+void DumpVisible2D(CKContext *ctx)
+{
+    CKLevel *level = ctx->GetCurrentLevel();
+    if (!level)
+        return;
+    const XObjectPointerArray &objs = level->ComputeObjectList(CKCID_2DENTITY);
+    std::printf("[poc2] vis2d frame=%ld:", g.frame);
+    for (CKObject **it = objs.Begin(); it != objs.End(); ++it)
+    {
+        CK2dEntity *e = (CK2dEntity *)(*it);
+        if (e && e->IsVisible() && e->GetName())
+            std::printf(" %s", e->GetName());
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
+void Dump2D(CKContext *ctx)
+{
+    CKLevel *level = ctx->GetCurrentLevel();
+    if (!level)
+        return;
+    const XObjectPointerArray &objs = level->ComputeObjectList(CKCID_2DENTITY);
+    std::printf("[poc2] 2d count=%d\\n", objs.Size());
+    for (CKObject **it = objs.Begin(); it != objs.End(); ++it)
+    {
+        CK2dEntity *e = (CK2dEntity *)(*it);
+        if (!e)
+            continue;
+        VxRect r;
+        e->GetRect(r);
+        CKBOOL visible = e->IsVisible();
+        std::printf("[poc2] 2d %s rect=%.1f,%.1f,%.1f,%.1f size=%.1fx%.1f visible=%d\\n",
+                    e->GetName() ? e->GetName() : "?", r.left, r.top, r.right, r.bottom, r.GetWidth(), r.GetHeight(),
+                    (int)visible);
+    }
+    std::fflush(stdout);
+}
+
+
+void DumpScene(CKContext *ctx)
+{
+    CKLevel *level = ctx->GetCurrentLevel();
+    if (!level)
+        return;
+
+    const CK_CLASSID ids[] = {CKCID_SPRITE3D, CKCID_SPRITETEXT, CKCID_2DENTITY, CKCID_LIGHT, CKCID_TARGETCAMERA,
+                              CKCID_CURVEPOINT};
+    const char *names[] = {"sprite3d", "sprite2dtext", "2dentity", "light", "camera", "curvepoint"};
+    for (int c = 0; c < 6; ++c)
+    {
+        const XObjectPointerArray &arr = level->ComputeObjectList(ids[c]);
+        std::printf("[poc2] scene %s=%d\n", names[c], arr.Size());
+        int i = 0;
+        for (CKObject **it = arr.Begin(); it != arr.End() && i < 120; ++it, ++i)
+        {
+            CKObject *o = *it;
+            if (!o)
+                continue;
+            std::printf("[poc2] scene   %s %s\n", names[c], o->GetName() ? o->GetName() : "?");
+        }
+    }
+
+    const XObjectPointerArray &beos = level->ComputeObjectList(CKCID_GROUP);
+    std::printf("[poc2] scene groups=%d\n", beos.Size());
+    for (CKObject **it = beos.Begin(); it != beos.End(); ++it)
+    {
+        CKGroup *grp = (CKGroup *)(*it);
+        if (!grp)
+            continue;
+        std::printf("[poc2] scene   group %s n=%d:", grp->GetName() ? grp->GetName() : "?", grp->GetObjectCount());
+        int i = 0;
+        for (int k = 0; k < grp->GetObjectCount() && k < 40; ++k)
+        {
+            CKObject *o = grp->GetObject(k);
+            if (o && o->GetName())
+                std::printf(" %s", o->GetName());
+            ++i;
+        }
+        std::printf("\n");
+    }
+
+    const XObjectPointerArray &ents = level->ComputeObjectList(CKCID_3DOBJECT);
+    std::printf("[poc2] scene ents=%d\n", ents.Size());
+    int i = 0;
+    for (CKObject **it = ents.Begin(); it != ents.End() && i < 200; ++it, ++i)
+    {
+        CK3dEntity *e = (CK3dEntity *)(*it);
+        if (!e)
+            continue;
+        VxVector pos(0.0f, 0.0f, 0.0f);
+        e->GetPosition(&pos);
+        std::printf("[poc2] scene   ent %s pos=%.1f,%.1f,%.1f vis=%d\n", e->GetName() ? e->GetName() : "?", pos.x, pos.y,
+                    pos.z, (int)e->IsVisible());
+    }
+    std::fflush(stdout);
+}
+
+
+// Synthetic physics benchmark: no level, no rendering. A big floor, one real
+// IVP_Ball dropped from 100 units, and N static 4u boxes spread over the floor.
+// This is what PoC-2 measures: how the ipion backend scales with box count.
+void Poc2Synthetic(CKIpionManager *man, CKContext *ctx, int count, CK3dEntity **outBall)
+{
+    CKLevel *level = ctx->GetCurrentLevel();
+    if (!level)
+        return;
+    if (!man->GetEnvironment())
+        man->CreateEnvironment();
+    if (!man->GetEnvironment())
+    {
+        std::printf("[poc2] synth: environment could not be created\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    CKMesh *floorMesh = (CKMesh *)ctx->CreateObject(CKCID_MESH, "Poc2FloorMesh");
+    if (!floorMesh)
+        return;
+    floorMesh->SetVertexCount(8);
+    for (int i = 0; i < 8; ++i)
+    {
+        VxVector v(((i & 1) ? 120.0f : -120.0f), ((i & 2) ? 10.0f : -10.0f), ((i & 4) ? 120.0f : -120.0f));
+        floorMesh->SetVertexPosition(i, &v);
+    }
+    floorMesh->SetFaceCount(0);
+    CK3dEntity *floorEnt = (CK3dEntity *)ctx->CreateObject(CKCID_3DOBJECT, "Poc2Floor");
+    if (!floorEnt)
+        return;
+    floorEnt->SetCurrentMesh(floorMesh);
+    floorEnt->SetPosition3f(0.0f, -10.0f, 0.0f);
+    level->AddObject(floorEnt);
+    IVP_Material *floorMat = new IVP_Material_Simple(0.6, 0.4);
+    const int floorRet =
+        man->CreatePhysicsObjectOnParameters(floorEnt, 1, &floorMesh, 0, NULL, NULL, 0, NULL, 1.0f, "poc2-floor", NULL,
+                                             TRUE, floorMat, 1.0f, (CKSTRING) "", FALSE, TRUE, FALSE, 0.1f, 0.1f);
+    if (floorRet == CK_OK)
+        man->OwnMaterial(floorEnt, floorMat);
+    else
+        delete floorMat;
+    std::printf("[poc2] synth: floor ret=%d objects=%d\n", floorRet, man->GetPhysicsObjectCount());
+
+    CK3dEntity *ballEnt = (CK3dEntity *)ctx->CreateObject(CKCID_3DOBJECT, "Poc2Ball");
+    if (!ballEnt)
+        return;
+    ballEnt->SetPosition3f(0.0f, 100.0f, 0.0f);
+    level->AddObject(ballEnt);
+    IVP_Material *ballMat = new IVP_Material_Simple(0.4, 0.5);
+    IVP_Ball *ballObj = man->CreatePhysicsBall("Poc2Ball", 1.0f, 2.0f, ballMat, 0.05f, 0.05f, ballEnt, FALSE, FALSE,
+                                               (CKSTRING) "", TRUE, NULL);
+    if (ballObj)
+        man->OwnMaterial(ballEnt, ballMat);
+    else
+        delete ballMat;
+    // CreatePhysicsBall (low level) does not register the entity <-> physics
+    // mapping; without it UpdateObjectWorldMatrix never touches the CK3dEntity
+    // and the entity keeps the position it was created at.
+    if (ballObj)
+        man->GetPhysicsObject(ballEnt, TRUE);
+    std::printf("[poc2] synth: ball=%d objects=%d\n", ballObj ? 1 : 0, man->GetPhysicsObjectCount());
+    std::fflush(stdout);
+    if (outBall)
+        *outBall = ballEnt;
+
+    if (count <= 0)
+    {
+        std::printf("[poc2] synth: floor+ball only\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    CKMesh *boxMesh = (CKMesh *)ctx->CreateObject(CKCID_MESH, "Poc2SynthBoxMesh");
+    if (!boxMesh)
+        return;
+    boxMesh->SetVertexCount(8);
+    for (int i = 0; i < 8; ++i)
+    {
+        VxVector v(((i & 1) ? 2.0f : -2.0f), ((i & 2) ? 2.0f : -2.0f), ((i & 4) ? 2.0f : -2.0f));
+        boxMesh->SetVertexPosition(i, &v);
+    }
+    boxMesh->SetFaceCount(0);
+
+    const int side = (int)std::ceil(std::cbrt((double)count));
+    const float spacing = 8.0f;
+    const double t0 = Poc2NowMs();
+    int made = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        const int ix = i % side;
+        const int iz = (i / side) % side;
+        const int iy = i / (side * side);
+        const float x = ((float)ix - (side - 1) * 0.5f) * spacing;
+        const float z = ((float)iz - (side - 1) * 0.5f) * spacing;
+        const float y = 2.0f + (float)iy * 6.0f;
+
+        char name[48];
+        std::snprintf(name, sizeof(name), "Poc2SynthBox%06d", i);
+        CK3dEntity *ent = (CK3dEntity *)ctx->CreateObject(CKCID_3DOBJECT, name);
+        if (!ent)
+            continue;
+        ent->SetCurrentMesh(boxMesh);
+        ent->SetPosition3f(x, y, z);
+        level->AddObject(ent);
+        IVP_Material *m = new IVP_Material_Simple(0.6, 0.3);
+        if (man->CreatePhysicsObjectOnParameters(ent, 1, &boxMesh, 0, NULL, NULL, 0, NULL, 1.0f, "poc2-synthbox", NULL, TRUE,
+                                                 m, 1.0f, (CKSTRING) "", FALSE, TRUE, FALSE, 0.1f, 0.1f) == CK_OK)
+        {
+            man->OwnMaterial(ent, m);
+            ++made;
+        }
+        else
+        {
+            delete m;
+        }
+    }
+    const double dt = Poc2NowMs() - t0;
+    std::printf("[poc2] synth: %d/%d boxes in %.1f ms, physics objects now %d\n", made, count, dt,
+                man->GetPhysicsObjectCount());
+    std::fflush(stdout);
+}
+
+void Start(CKIpionManager *man, CKContext *ctx)
+{
+    g.started = true;
+    g.startMs = Poc2NowMs();
+    g.lastFrameMs = g.startMs;
+    g.target = EnvInt("BALLANCE_POC2_COUNT", 0);
+    g.delay = EnvDouble("BALLANCE_POC2_DELAY", 8.0);
+    g.size = EnvDouble("BALLANCE_POC2_SIZE", 4.0);
+
+    std::string dir = EnvText("BALLANCE_POC2_DIR", "/tmp/poc2");
+    std::string tag = EnvText("BALLANCE_POC2_TAG", "run");
+    std::string path = dir + "/physics-" + tag + ".csv";
+    g.csv = std::fopen(path.c_str(), "w");
+    if (g.csv)
+    {
+        std::fprintf(g.csv, "# frame,simulate_ms,frame_ms,physics_objects,movable_objects,created,level\n");
+        std::fflush(g.csv);
+    }
+    else
+    {
+        std::printf("[poc2] cannot write %s\n", path.c_str());
+    }
+
+    CKLevel *level = ctx->GetCurrentLevel();
+    CKSTRING levelName = level ? level->GetName() : NULL;
+    std::printf("[poc2] start: target=%d delay=%.1fs level=%s physics_objects=%d movable=%d\n", g.target, g.delay,
+                levelName ? levelName : "?", man->GetPhysicsObjectCount(), man->m_MovableObjects.len());
+}
+} // namespace
+
+double Poc2NowMs()
+{
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+
+void Poc2BeforeFrame(CKIpionManager *man)
+{
+    if (!man)
+        return;
+    CKContext *ctx = man->m_Context;
+    if (!ctx)
+        return;
+    if (!std::getenv("BALLANCE_POC2_COUNT") && !std::getenv("BALLANCE_POC2_LOG"))
+        return;
+
+    if (!g.started)
+        Start(man, ctx);
+
+    ++g.frame;
+    const double now = Poc2NowMs();
+    g.frameMs = now - g.lastFrameMs;
+    g.lastFrameMs = now;
+
+    static bool dumped = false;
+    if (!dumped && g.frame >= EnvInt("BALLANCE_POC2_DUMP", 0) && EnvInt("BALLANCE_POC2_DUMP", 0) > 0)
+    {
+        dumped = true;
+        DumpLevel(ctx);
+        if (EnvInt("BALLANCE_POC2_SCENE", 0) > 0)
+            DumpScene(ctx);
+        if (EnvInt("BALLANCE_POC2_2D", 0) > 0)
+            Dump2D(ctx);
+        if (EnvInt("BALLANCE_POC2_GRAPH", 0) > 0)
+            DumpGraph(ctx);
+        {
+            const char *want = std::getenv("BALLANCE_POC2_TREE");
+            if (want && *want)
+            {
+                const XObjectPointerArray &bs = ctx->GetCurrentLevel()->ComputeObjectList(CKCID_BEHAVIOR);
+                for (CKObject **it = bs.Begin(); it != bs.End(); ++it)
+                {
+                    CKBehavior *b = (CKBehavior *)(*it);
+                    if (!b || !b->GetName())
+                        continue;
+                    if (std::strstr(want, b->GetName()))
+                        DumpTree(b, 0);
+                }
+            }
+        }
+    }
+
+    {
+        static bool activated = false;
+        const char *want = std::getenv("BALLANCE_POC2_ACTIVATE");
+        if (!activated && want && *want && g.frame >= EnvInt("BALLANCE_POC2_ACTIVATE_AT", 120))
+        {
+            activated = true;
+            const XObjectPointerArray &bs = ctx->GetCurrentLevel()->ComputeObjectList(CKCID_BEHAVIOR);
+            for (CKObject **it = bs.Begin(); it != bs.End(); ++it)
+            {
+                CKBehavior *b = (CKBehavior *)(*it);
+                if (!b || !b->GetName())
+                    continue;
+                if (std::strcmp(b->GetName(), want) != 0)
+                    continue;
+                const int idx = EnvInt("BALLANCE_POC2_ACTIVATE_INPUT", 0);
+                if (idx < b->GetInputCount())
+                {
+                    b->ActivateInput(idx, TRUE);
+                    std::printf("[poc2] activated %s input %d at frame %ld\n", want, idx, g.frame);
+                    std::fflush(stdout);
+                }
+                else
+                {
+                    std::printf("[poc2] %s has no input %d (count %d)\n", want, idx, b->GetInputCount());
+                }
+            }
+        }
+    }
+
+    {
+        static int lastDump = 0;
+        const int every = EnvInt("BALLANCE_POC2_2D_EVERY", 0);
+        if (every > 0 && g.frame - lastDump >= every)
+        {
+            lastDump = (int)g.frame;
+            DumpVisible2D(ctx);
+        }
+    }
+
+    {
+        static bool synthDone = false;
+        const int synth = EnvInt("BALLANCE_POC2_SYNTH", 0);
+        if (!synthDone && synth >= 0 && std::getenv("BALLANCE_POC2_SYNTH") &&
+            (now - g.startMs) / 1000.0 >= EnvDouble("BALLANCE_POC2_SYNTH_AT", 3.0))
+        {
+            synthDone = true;
+            Poc2Synthetic(man, ctx, synth, &g.ball);
+        }
+    }
+
+    if (!g.spawnTried && g.target > 0 && (now - g.startMs) / 1000.0 >= g.delay && man->GetEnvironment() &&
+        man->GetPhysicsObjectCount() > 0)
+    {
+        g.spawnTried = true;
+        SpawnBlocks(man, ctx, g.target);
+    }
+}
+
+void Poc2AfterFrame(CKIpionManager *man, double simulateMs)
+{
+    if (!man || !g.started || !g.csv)
+        return;
+
+    CKContext *ctx = man->m_Context;
+    CKLevel *level = ctx ? ctx->GetCurrentLevel() : NULL;
+    CKSTRING levelName = level ? level->GetName() : NULL;
+
+    // Read the ball from the ipion core, not from the CK3dEntity: the entity is
+    // only refreshed by UpdateObjectWorldMatrix, and for a physics object this
+    // hook created itself that sync does not fire (client_data is not wired).
+    float ballY = -1.0f;
+    if (g.ball)
+    {
+        PhysicsObject *po = man->GetPhysicsObject(g.ball);
+        if (po && po->m_RealObject && po->m_RealObject->get_core())
+            ballY = (float)po->m_RealObject->get_core()->get_position_PSI()->k[1];
+    }
+    std::fprintf(g.csv, "%ld,%.4f,%.4f,%d,%d,%d,%s,%.2f\n", g.frame, simulateMs, g.frameMs,
+                 man->GetPhysicsObjectCount(), man->m_MovableObjects.len(), g.created,
+                 levelName ? levelName : "?", ballY);
+
+    if (g.frame % 60 == 0)
+    {
+        for (int i = 0; i < man->m_MovableObjects.len() && i < 3; ++i)
+        {
+            IVP_Real_Object *ro = man->m_MovableObjects.element_at(i);
+            if (ro && ro->get_core())
+            {
+                const IVP_U_Point *p = ro->get_core()->get_position_PSI();
+                std::printf("[poc2] movable%d core=%.2f,%.2f,%.2f speed=%.3f\n", i, p->k[0], p->k[1], p->k[2],
+                            ro->get_core()->speed.real_length());
+            }
+        }
+        std::fflush(stdout);
+        std::printf("[poc2] frame=%ld sim=%.3fms frame=%.2fms objects=%d movable=%d created=%d level=%s ballY=%.1f\n",
+                    g.frame, simulateMs, g.frameMs, man->GetPhysicsObjectCount(), man->m_MovableObjects.len(),
+                    g.created, levelName ? levelName : "?", ballY);
+        std::fflush(stdout);
+    }
+}
