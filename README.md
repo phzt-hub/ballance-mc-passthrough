@@ -7,9 +7,11 @@
 `minecraft-gta5-passthrough`（GTA5 ↔ Minecraft 的开源实现）。蓝本的**内容层（MC 侧的方块/怪/TNT/交互）可以整个搬过来**，
 要做的是换掉"宿主适配层"：GTA 的 native 调用 → Ballance 的 Virtools CK2。
 
-## 当前状态：PoC-0（可行性验证）✅ 通过
+## 当前状态：PoC-0（可行性验证）✅ 通过 · 路线已改推 A′
 
-三个"生死问题"都有明确答案，证据见 **[docs/feasibility.md](docs/feasibility.md)**：
+三个"生死问题"都有明确答案，证据见 **[docs/feasibility.md](docs/feasibility.md)**。
+**2026-11-01 追加核查**：BML+ 把渲染上下文 / 碰撞 / 物理 / 输入全部公开给 mod，深度就在公开结构体 `VxDirectXData.DDZBuffer` 里，
+而 BML+ 只支持**同样开源的** BallancePlayer —— 所以"源码"和"mod 生态"不必二选一。见 **[docs/bmlplus-hooks.md](docs/bmlplus-hooks.md)**。
 
 | 生死问题 | 结论 |
 |---|---|
@@ -35,7 +37,8 @@
 ## 目录
 
 ```
-docs/feasibility.md      PoC-0 的证据与结论（本轮产出）
+docs/feasibility.md      PoC-0 的证据与结论（Ballanced / SDL3 路线）
+docs/bmlplus-hooks.md    BML+ 钩子能力核查（路线 A′：BallancePlayer + BML+）
 external/fetch-upstream.sh  拉上游 Ballanced / CKRenderEngine（不随本仓库分发）
 ```
 
