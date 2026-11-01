@@ -1,0 +1,227 @@
+#include "CKSdlGpuRasterizerContext.h"
+
+// ===========================================================================
+// PoC-1 depth dump (ballance-mc-passthrough scaffold)
+// ===========================================================================
+// Reads back the depth buffer (and the presented colour buffer) of a chosen
+// submitted frame into plain files, so the geometry can be checked offline.
+//
+// Off by default, so the stock runtime behaves exactly as before:
+//   BALLANCE_POC1_DEPTH_FRAMES=60,120   comma separated submission numbers
+//   BALLANCE_POC1_DEPTH_DIR=/tmp/poc1/out
+//
+// Per frame and per source this writes <label>-<frame>.bin (tightly packed
+// rows, no padding) plus <label>-<frame>.json describing the layout. Decoding
+// is done in tools/poc1/decode_depth.py so a wrong guess here never costs a
+// rebuild: the raw bytes are the source of truth.
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <string>
+#include <vector>
+
+namespace {
+
+struct Poc1DepthDumpState {
+    bool Parsed = false;
+    bool Enabled = false;
+    std::string Directory = "/tmp/poc1/out";
+    std::vector<unsigned> Frames;
+};
+
+Poc1DepthDumpState &Poc1State()
+{
+    static Poc1DepthDumpState state;
+    return state;
+}
+
+void Poc1ParseEnvironment()
+{
+    Poc1DepthDumpState &state = Poc1State();
+    state.Parsed = true;
+    const char *frames = SDL_getenv("BALLANCE_POC1_DEPTH_FRAMES");
+    if (!frames || !*frames)
+        return;
+    if (const char *directory = SDL_getenv("BALLANCE_POC1_DEPTH_DIR"))
+        if (*directory)
+            state.Directory = directory;
+    const char *cursor = frames;
+    while (*cursor) {
+        char *end = NULL;
+        const unsigned long value = strtoul(cursor, &end, 10);
+        if (end == cursor)
+            break;
+        state.Frames.push_back((unsigned)value);
+        cursor = end;
+        while (*cursor == ',' || *cursor == ' ')
+            ++cursor;
+    }
+    state.Enabled = !state.Frames.empty();
+    SDL_Log("poc1: depth dump enabled, %zu frame(s), directory %s",
+            state.Frames.size(), state.Directory.c_str());
+}
+
+const char *Poc1FormatName(SDL_GPUTextureFormat format)
+{
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_D16_UNORM: return "D16_UNORM";
+    case SDL_GPU_TEXTUREFORMAT_D24_UNORM: return "D24_UNORM";
+    case SDL_GPU_TEXTUREFORMAT_D32_FLOAT: return "D32_FLOAT";
+    case SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
+    case SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT: return "D32_FLOAT_S8_UINT";
+    case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+    case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+    default: return "unknown";
+    }
+}
+
+unsigned Poc1BytesPerPixel(SDL_GPUTextureFormat format)
+{
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_D16_UNORM:
+        return 2;
+    case SDL_GPU_TEXTUREFORMAT_D24_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_D32_FLOAT:
+    case SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT:
+    case SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+// Downloads one texture through a dedicated command buffer. Deliberately
+// synchronous: PoC-1 dumps a handful of frames and wants the files on disk
+// when the frame returns, not a ticketing path that has to be reasoned about.
+bool Poc1WriteTexture(SDL_GPUDevice *device, const std::shared_ptr<CKSdlGpuTexture> &texture,
+                      const std::string &directory, const char *label, unsigned frame)
+{
+    if (!device || !texture || !texture->Image)
+        return false;
+    if (texture->Samples > 1) {
+        SDL_Log("poc1: %s frame %u skipped, %u-sample targets cannot be downloaded",
+                label, frame, texture->Samples);
+        return false;
+    }
+    const unsigned width = texture->Info.width;
+    const unsigned height = texture->Info.height;
+    const unsigned bytesPerPixel = Poc1BytesPerPixel(texture->Info.format);
+    if (!width || !height || !bytesPerPixel) {
+        SDL_Log("poc1: %s frame %u skipped, unsupported layout (%ux%u, %s)",
+                label, frame, width, height, Poc1FormatName(texture->Info.format));
+        return false;
+    }
+    const Uint32 size = (Uint32)width * height * bytesPerPixel;
+
+    SDL_GPUTransferBufferCreateInfo bufferInfo = {};
+    bufferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    bufferInfo.size = size;
+    SDL_GPUTransferBuffer *buffer = SDL_CreateGPUTransferBuffer(device, &bufferInfo);
+    if (!buffer) {
+        SDL_Log("poc1: %s frame %u CreateGPUTransferBuffer failed: %s", label, frame, SDL_GetError());
+        return false;
+    }
+
+    bool ok = false;
+    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
+    if (commands) {
+        SDL_GPUTextureRegion source = {};
+        source.texture = texture->Image.get();
+        source.w = width;
+        source.h = height;
+        source.d = 1;
+        SDL_GPUTextureTransferInfo destination = {};
+        destination.transfer_buffer = buffer;
+        destination.pixels_per_row = width;
+        destination.rows_per_layer = height;
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+        if (copy) {
+            SDL_DownloadFromGPUTexture(copy, &source, &destination);
+            SDL_EndGPUCopyPass(copy);
+            SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+            if (fence) {
+                SDL_WaitForGPUFences(device, true, &fence, 1);
+                SDL_ReleaseGPUFence(device, fence);
+                ok = true;
+            } else {
+                SDL_Log("poc1: %s frame %u submit failed: %s", label, frame, SDL_GetError());
+            }
+        } else {
+            SDL_Log("poc1: %s frame %u BeginGPUCopyPass failed: %s", label, frame, SDL_GetError());
+            SDL_CancelGPUCommandBuffer(commands);
+        }
+    } else {
+        SDL_Log("poc1: %s frame %u AcquireGPUCommandBuffer failed: %s", label, frame, SDL_GetError());
+    }
+
+    if (ok) {
+        void *mapped = SDL_MapGPUTransferBuffer(device, buffer, false);
+        if (mapped) {
+            char rawPath[512];
+            SDL_snprintf(rawPath, sizeof(rawPath), "%s/%s-%06u.bin", directory.c_str(), label, frame);
+            FILE *raw = fopen(rawPath, "wb");
+            if (raw) {
+                ok = fwrite(mapped, 1, size, raw) == size;
+                fclose(raw);
+            } else {
+                ok = false;
+            }
+            char metaPath[512];
+            SDL_snprintf(metaPath, sizeof(metaPath), "%s/%s-%06u.json", directory.c_str(), label, frame);
+            FILE *meta = fopen(metaPath, "wb");
+            if (meta) {
+                fprintf(meta,
+                        "{\"frame\": %u, \"label\": \"%s\", \"width\": %u, \"height\": %u, "
+                        "\"bytes_per_pixel\": %u, \"sdl_format\": \"%s\", \"samples\": %u, "
+                        "\"raw\": \"%s-%06u.bin\"}\n",
+                        frame, label, width, height, bytesPerPixel,
+                        Poc1FormatName(texture->Info.format), texture->Samples, label, frame);
+                fclose(meta);
+            }
+            SDL_UnmapGPUTransferBuffer(device, buffer);
+            if (ok)
+                SDL_Log("poc1: %s frame %u -> %s (%ux%u %s)", label, frame, rawPath, width, height,
+                        Poc1FormatName(texture->Info.format));
+        } else {
+            ok = false;
+            SDL_Log("poc1: %s frame %u MapGPUTransferBuffer failed: %s", label, frame, SDL_GetError());
+        }
+    }
+    SDL_ReleaseGPUTransferBuffer(device, buffer);
+    return ok;
+}
+
+} // namespace
+
+void CKSdlGpuRasterizerContext::Poc1MaybeDumpDepth()
+{
+    Poc1DepthDumpState &state = Poc1State();
+    if (!state.Parsed)
+        Poc1ParseEnvironment();
+    if (!state.Enabled || !Device || !Ready())
+        return;
+    bool wanted = false;
+    for (size_t i = 0; i < state.Frames.size() && !wanted; ++i)
+        wanted = state.Frames[i] == Submission;
+    if (!wanted)
+        return;
+
+    // The scene target holds what the level rendered; the native target holds
+    // the resolved image the window shows. Dump both, let the offline decoder
+    // decide which one is meaningful instead of guessing here.
+    const CKSdlGpuPresentTarget &scene = m_Present.SceneTarget();
+    const CKSdlGpuPresentTarget &native = m_Present.NativeTarget();
+    if (scene.IsActive())
+        Poc1WriteTexture(Device, Textures.Get(scene.DepthTexture), state.Directory, "scene-depth",
+                         (unsigned)Submission);
+    if (native.IsActive()) {
+        Poc1WriteTexture(Device, Textures.Get(native.DepthTexture), state.Directory, "native-depth",
+                         (unsigned)Submission);
+        if (native.OwnsColor)
+            Poc1WriteTexture(Device, Textures.Get(native.ColorTexture), state.Directory,
+                             "native-color", (unsigned)Submission);
+    }
+}
