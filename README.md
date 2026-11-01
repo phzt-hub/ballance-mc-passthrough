@@ -34,12 +34,22 @@
 | M3b | 地面 raycast | Steve 站在球道上不穿模 |
 | M3c | 方块 → 碰撞体 | **球能撞上你搭的墙** |
 
+**离线侧已完成（2026-11-01）**：13 关 472,534 个三角全部可离线导出（`tools/nmo_geom`），
+尺度已标定（1 MC 方块 = 4.0 Ballance 单位 = 1 个球直径），见 [docs/scale-calibration.md](docs/scale-calibration.md)。
+
 ## 目录
 
 ```
-docs/feasibility.md      PoC-0 的证据与结论（Ballanced / SDL3 路线）
-docs/bmlplus-hooks.md    BML+ 钩子能力核查（路线 A′：BallancePlayer + BML+）
-external/fetch-upstream.sh  拉上游 Ballanced / CKRenderEngine（不随本仓库分发）
+docs/feasibility.md        PoC-0 的证据与结论（Ballanced / SDL3 路线）
+docs/bmlplus-hooks.md      BML+ 钩子能力核查（路线 A′：BallancePlayer + BML+）
+docs/level-parse.md        离线读关卡几何：已跑通，含三个坑与矩阵约定
+docs/scale-calibration.md  尺度标定表（球 / 物理件 / 13 关走廊宽 / 方块比例）
+tools/nmo_geom.cpp         读 .nmo 导出世界空间 OBJ + JSON（libcmo21）
+tools/build-nmo-geom.sh    建它（钉死编译参数）
+tools/export-levels.sh     13 关 + PH + 资产全量导出
+tools/calibrate.py         由导出产物生成 docs/scale-calibration.md
+tools/nmo_dump.cpp         早期的容器层探针（看不到 3D 类，仅存档）
+external/fetch-upstream.sh 拉上游 Ballanced / CKRenderEngine（不随本仓库分发）
 ```
 
 ## 上游
