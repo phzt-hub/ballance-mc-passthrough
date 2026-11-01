@@ -1,0 +1,6 @@
+# 上游源码不进本仓库
+/Ballanced/
+/CKRenderEngine/
+/build/
+*.png
+*.log
