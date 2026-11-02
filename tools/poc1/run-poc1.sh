@@ -37,5 +37,5 @@ for file in base.cmo Database.tdb; do ln -sfn "$ASSETS/$file" "$GAME/$file"; don
 echo "== running on DISPLAY=$DISPLAY, dumps -> $OUT"
 cd "$GAME/Bin"
 BALLANCE_POC1_DEPTH_FRAMES="$FRAMES" BALLANCE_POC1_DEPTH_DIR="$OUT" \
-    timeout "$RUN_SECONDS" ./Player "$@" || true
+    timeout -s KILL "$RUN_SECONDS" ./Player "$@" || true
 echo "== dumps: $(ls "$OUT" 2>/dev/null | wc -l) file(s)"
