@@ -7,3 +7,4 @@
 
 # python 缓存
 __pycache__/
+tools/passthrough/shmfeed

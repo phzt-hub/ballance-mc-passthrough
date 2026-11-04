@@ -15,6 +15,13 @@ The hook adds:
                                  frame shows the level and not the menu
   * BALLANCE_POC_CAM=x,y,z,tx,ty,tz -- park the eye at a fixed spot and aim it
                                  (also pins the view/projection matrices)
+  * BALLANCE_POC_NMO=a,b,...  -- extra NMOs merged alongside the level
+  * BALLANCE_POC_START_LEVEL=chain|all -- fire the level start-up scripts
+                                 (they are inactive after a plain merge, which
+                                 is why a merged level never starts)
+  * BALLANCE_POC_START_FRAME=n -- render call that fires the deferred pass (120)
+  * BALLANCE_POC_STOP_MENU=1  -- stop the menu scripts, which otherwise keep
+                                 re-attaching Cam_MenuLevel every frame
 
 The hook lives in git submodules (Source/Player), so it ships as a script:
 run this after every submodule update. It is idempotent.
@@ -42,6 +49,8 @@ CPP_ANCHOR = "void CGamePlayer::Run()\n"
 # pocframelog.cpp is concatenated first: LoadLevel() calls Poc1NoteMerged(), and
 # Poc1FrameLog() is called from Render(), so both have to be declared before use.
 CPP_LINE = ((HERE / "pocframelog.cpp").read_text(encoding="utf-8") + "\n" +
+            (HERE / "pocscripts.cpp").read_text(encoding="utf-8") + "\n" +
+            (HERE / "poc2d.cpp").read_text(encoding="utf-8") + "\n" +
             (HERE / "levelboot.cpp").read_text(encoding="utf-8"))
 
 # Render() is where the answer to "is the merged level on screen?" is
@@ -54,7 +63,13 @@ RENDER_ANCHOR = """void CGamePlayer::Render()
 RENDER_LINE = """void CGamePlayer::Render()
 {
     Poc1ApplyCameraPin(m_CKContext, m_RenderContext);
+    PocLevelStartAuto(m_CKContext);
+    PocLevelStopMenu(m_CKContext);
     Poc1FrameLog(m_CKContext, m_RenderContext);
+    Poc1ForceCursor(m_CKContext);
+    Poc1InputLog(m_CKContext, m_RenderContext);
+    PocDumpScriptsAuto(m_CKContext);
+    PocDump2DAuto(m_CKContext);
     m_RenderContext->Render();
 }
 """
@@ -104,3 +119,33 @@ else:
         raise SystemExit("Render() anchor not found exactly once, refusing")
     PLAYER_CPP.write_text(render_text.replace(RENDER_ANCHOR, RENDER_LINE), encoding="utf-8")
     print(PLAYER_CPP.name + " (render): patched")
+
+
+# --- SdlInputManager: keep the OS pointer visible --------------------------
+# The "Mouse Cursor" building block hides the OS pointer and draws its own
+# sprite from a post-sprite callback. That sprite never reaches the screen in
+# this SDL/GL port, and the push-button block gates clicks on
+# GetCursorVisibility(), so the menu becomes unclickable. Until the sprite is
+# ported, ShowCursor() keeps the OS pointer on (BALLANCE_SPRITE_CURSOR=1 opts
+# out). Lives in the SdlInputManager submodule, hence the same script-or-lose
+# treatment as the Player patch.
+CURSOR_CPP = ROOT / "Source/Managers/SdlInputManager/Cursor.cpp"
+CURSOR_OLD = '''#include "SdlInputManager.h"
+
+#include "VxWindowFunctions.h"
+
+void SdlInputManager::ShowCursor(CKBOOL iShow)
+{
+    m_ShowCursor = iShow;
+    EnsureCursorVisible(iShow);
+}'''
+CURSOR_NEW = (HERE / "sdl-cursor.cpp").read_text(encoding="utf-8").rstrip()
+
+cursor_text = CURSOR_CPP.read_text(encoding="utf-8")
+if "KeepSystemCursorVisible" in cursor_text:
+    print(CURSOR_CPP.name + " (cursor): already")
+elif cursor_text.count(CURSOR_OLD) != 1:
+    print(CURSOR_CPP.name + " (cursor): SKIPPED - unexpected content, patch by hand")
+else:
+    CURSOR_CPP.write_text(cursor_text.replace(CURSOR_OLD, CURSOR_NEW), encoding="utf-8")
+    print(CURSOR_CPP.name + " (cursor): patched")

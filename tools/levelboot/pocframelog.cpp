@@ -261,3 +261,70 @@ static void Poc1FrameLog(CKContext *context, CKRenderContext *rc)
         CLogger::Get().Debug("PoC frame %d: merged bounds min=(%.2f %.2f %.2f) max=(%.2f %.2f %.2f)",
                              frame, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
 }
+
+// Input probe: does the X pointer reach the game at all? The menu is driven by
+// TT PushButton2, which needs (a) the mouse position the engine reports and
+// (b) the left button going down while the cursor is over the button sprite.
+// Neither is visible from outside, so log both.
+//
+//   BALLANCE_POC_INPUTLOG=<n>   every n-th render call (n<1 -> 30)
+static void Poc1InputLog(CKContext *ctx, CKRenderContext *rc)
+{
+    static int calls = 0;
+    ++calls;
+
+    const char *spec = getenv("BALLANCE_POC_INPUTLOG");
+    if (!spec || !ctx)
+        return;
+
+    int every = atoi(spec);
+    if (every < 1)
+        every = 30;
+    if (calls % every)
+        return;
+
+    CKInputManager *im = (CKInputManager *)ctx->GetManagerByGuid(INPUT_MANAGER_GUID);
+    if (!im)
+    {
+        CLogger::Get().Debug("PoC input %d: no input manager", calls);
+        return;
+    }
+
+    Vx2DVector rel, abs;
+    im->GetMousePosition(rel, FALSE);
+    im->GetMousePosition(abs, TRUE);
+
+    const char *picked = "(none)";
+    if (rc)
+    {
+        VxRect screen;
+        rc->GetWindowRect(screen, FALSE);
+        Vx2DVector p = rel;
+        p += screen.GetTopLeft();
+        CKObject *o = rc->Pick2D(p);
+        if (o && o->GetName())
+            picked = o->GetName();
+        else if (o)
+            picked = "(unnamed)";
+    }
+
+    CLogger::Get().Debug("PoC input %d: rel=(%.1f %.1f) abs=(%.1f %.1f) left=%d clicked=%d vis=%d pick2d=%s",
+                         calls, rel.x, rel.y, abs.x, abs.y,
+                         im->IsMouseButtonDown(CK_MOUSEBUTTON_LEFT),
+                         im->IsMouseClicked(CK_MOUSEBUTTON_LEFT),
+                         im->GetCursorVisibility(), picked);
+}
+
+// The menu's TT PushButton2 only reacts while the input manager says the cursor
+// is visible: ShowCursor(FALSE) is what the "Mouse Cursor" building block does
+// when it draws its own sprite cursor, and in the SDL port that sprite never
+// reaches the screen -- so the menu ends up with no cursor and no clicks.
+// BALLANCE_POC_CURSOR=1 puts the system cursor back.
+static void Poc1ForceCursor(CKContext *ctx)
+{
+    if (!ctx || !getenv("BALLANCE_POC_CURSOR"))
+        return;
+    CKInputManager *im = (CKInputManager *)ctx->GetManagerByGuid(INPUT_MANAGER_GUID);
+    if (im && !im->GetCursorVisibility())
+        im->ShowCursor(TRUE);
+}
