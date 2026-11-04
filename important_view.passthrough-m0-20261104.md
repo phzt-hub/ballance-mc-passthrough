@@ -60,3 +60,19 @@ Magic='MFP0' Version=1; 生产者写槽 → 发布 PublishedSlot → __atomic �
 ## 边界
 - Ballanced 仍是脏工作区（levelboot 补丁 + 本轮 passthrough 补丁），未提交 git。
 - 未动 128、未动新作17、未动 dsh-backup.sh。ask_user_question 在本环境挂死，不要用。
+
+## 2026-11-05 补：闪烁已修 + 两仓库已推 gitee
+
+- **闪烁修复**：消费者无新帧时复用上次上传的纹理重画（`redraws` 计数），不再只在
+  FrameId 变化时 SubmitCopy。实测 6 张样本两两差 **0.03（>8 像素 0.05%）→ 不闪**。
+- **保真**：合成图案档与生产者写入字节在左右各 64px 边带 **mean 0.00 / max 0**；
+  真 MC 档边带 mean 0.41（>8 0.90%）。整帧差 mean 16.4/36.8% 差的是 Ballance 自己的 2D 菜单（符合设计）。
+- **对照**：on vs off 96.3% 像素不同 → 贴片确实来自邮箱而非游戏自身场景。
+- 新增 `verify-m0b.py`（闪烁/保真/对照三项判定）、`tools/passthrough/README.md`。
+- 修 `inspect-mailbox.py` 的 `stats(*slot_view(...))` 少一个参数（非 --watch 时崩）。
+- **已推送**：
+  - ballance-mc-passthrough → gitee `1191fd8`（两个提交：levelboot 探针、passthrough M0/M0b）
+  - xpconvert(mcmod) → gitee `74f092a`（客户端帧导出）
+  - 注意：passthrough 的 remote 由 HTTPS 改成 SSH（HTTPS 无凭据），已 rebase 到远端 LICENSE 提交之上。
+- 仍未动：Ballanced 脏工作区、128、新作17、dsh-backup.sh。
+
