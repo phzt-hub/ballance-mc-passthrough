@@ -8,6 +8,7 @@ commits:
 | `Source/Player` | `github.com/doyaGu/Player` | `Player.patch` |
 | `Source/BuildingBlocks` | `github.com/doyaGu/BuildingBlocks` | `BuildingBlocks.patch` |
 | `Source/RenderEngine` | `github.com/doyaGu/RenderEngine` | `RenderEngine.patch` |
+| `Source/Managers/SdlInputManager` | `github.com/doyaGu/SdlInputManager` | `SdlInputManager.patch` |
 
 Anything we change inside those submodules is therefore **not committed anywhere** by
 the Ballanced repository itself: `git submodule update` restores the pinned commit
@@ -50,6 +51,15 @@ Also carries the PoC frame-log scaffolding: `BALLANCE_POC_FRAMELOG`,
 when `BALLANCE_POC1_DEPTH_FRAMES` is set, hooked into
 `CKSdlGpuRasterizerContext::Submit()`.
 
+### SdlInputManager.patch
+Two port fixes. `Cursor.cpp`: `KeepSystemCursorVisible()` pins
+`ShowCursor()` to TRUE (`BALLANCE_SPRITE_CURSOR=1` restores the original
+behaviour) -- this port cannot draw the game's own sprite cursor, and the push-button
+building block refuses to arm while the cursor reports invisible, so the whole Ballance
+menu becomes unclickable. `SdlInputManager.cpp`: `BALLANCE_INPUT_DEBUG=1` prints
+one line per pointer/window event *before* the window and pause filters, so "the event
+never arrived" and "it arrived and was dropped" stop looking the same from outside.
+
 ## Regenerating a patch
 Edit the submodule, then re-export so the patch matches the new working tree:
 
@@ -70,7 +80,8 @@ its own `base_commit`; the resulting tree is byte-identical to the dirty tree
 untracked and were excluded from that comparison.
 
 ```
-Player.patch          base e5073295  4 files  512 lines
+Player.patch          base e5073295  7 files  2270 lines
 BuildingBlocks.patch  base 5b833b92  4 files  790 lines
 RenderEngine.patch    base 049c78b3  4 files  271 lines
+SdlInputManager.patch base 368d4143  2 files   74 lines
 ```

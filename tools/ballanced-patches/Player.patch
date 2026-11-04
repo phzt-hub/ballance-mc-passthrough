@@ -31,7 +31,7 @@ index 347ca16..4bc5d2e 100644
  
  #define GAMECONFIG_PATH_FIELDS \
 diff --git a/src/GamePlayer.cpp b/src/GamePlayer.cpp
-index 4ffa776..316f8c6 100644
+index 4ffa776..0272d99 100644
 --- a/src/GamePlayer.cpp
 +++ b/src/GamePlayer.cpp
 @@ -382,6 +382,978 @@ bool CGamePlayer::Load(const char *filename)
@@ -1013,8 +1013,36 @@ index 4ffa776..316f8c6 100644
  void CGamePlayer::Run()
  {
      while (Update())
-@@ -471,6 +1443,23 @@ void CGamePlayer::Process()
+@@ -469,8 +1441,52 @@ void CGamePlayer::Process()
+     m_CKContext->Process();
+ }
  
++// Relative mouse mode for the first-person rig, applied where the window lives.
++//
++// Why not in SdlInputManager: it tracks m_InputWindow from SetInputViewport, and
++// this player never calls that, so the manager has no window handle here
++// (BALLANCE_INPUT_DEBUG=1 shows input=0 on every event). SDL_SetWindowRelativeMouseMode
++// needs the real SDL_Window, and CGamePlayer owns it.
++//
++// Once captured, SDL warps the pointer back to the window centre after every
++// motion. That also removes the bogus first delta an uncaptured pointer
++// produces: SDL computed it against wherever the pointer had been, which
++// measured as a phantom "catch-up" turn in the opposite direction.
++static void ApplyRelativeMouseMode(SDL_Window *window, bool want)
++{
++    static bool applied = false;
++    if (!window || want == applied) return;
++    const bool ok = SDL_SetWindowRelativeMouseMode(window, want) != false;
++    if (ok) applied = want;
++    // Logged, not inferred: the pointer being released for a menu and the pointer
++    // never having been captured look identical in a screenshot.
++    // stderr, not CLogger: Debug lines are filtered at the default INFO level, and
++    // "was the pointer released?" has to be readable in every run.
++    fprintf(stderr, "[mc-steve] relative mouse mode %s (asked %s)%s\n",
++            applied ? "on" : "off", want ? "on" : "off", ok ? "" : " -- SDL refused");
++    fflush(stderr);
++}
++
  void CGamePlayer::Render()
  {
 +    Poc1ApplyCameraPin(m_CKContext, m_RenderContext);
@@ -1033,11 +1061,12 @@ index 4ffa776..316f8c6 100644
 +        const float elapsed = lastTicks ? (float)(nowTicks - lastTicks) / 1000.0f : 0.0f;
 +        lastTicks = nowTicks;
 +        m_Steve.Frame(m_CKContext, m_RenderContext, elapsed);
++        ApplyRelativeMouseMode(m_SdlWindow, m_Steve.WantsRelativeMouse());
 +    }
      m_RenderContext->Render();
  }
  
-@@ -485,6 +1474,8 @@ void CGamePlayer::Shutdown()
+@@ -485,6 +1501,8 @@ void CGamePlayer::Shutdown()
          m_GameInfo = NULL;
      }
  
@@ -1046,6 +1075,14 @@ index 4ffa776..316f8c6 100644
      ShutdownEngine();
      ShutdownWindow();
  
+@@ -1542,6 +2560,7 @@ void CGamePlayer::OnActivateApp(bool active)
+                 m_InputManager->Pause(TRUE);
+ 
+             ReleaseCursorClip();
++            ApplyRelativeMouseMode(m_SdlWindow, false);
+ 
+             if (IsRenderFullscreen())
+             {
 diff --git a/src/GamePlayer.h b/src/GamePlayer.h
 index 3b54c38..1543654 100644
 --- a/src/GamePlayer.h
@@ -1079,10 +1116,10 @@ index 3b54c38..1543654 100644
  #endif /* PLAYER_GAMEPLAYER_H */
 diff --git a/src/MinecraftSteve.cpp b/src/MinecraftSteve.cpp
 new file mode 100644
-index 0000000..0e032b2
+index 0000000..c295456
 --- /dev/null
 +++ b/src/MinecraftSteve.cpp
-@@ -0,0 +1,678 @@
+@@ -0,0 +1,953 @@
 +#include "MinecraftSteve.h"
 +
 +#include <map>
@@ -1137,6 +1174,20 @@ index 0000000..0e032b2
 +     {4, 16, 4, 4}, {8, 16, 4, 4}, {0, 20, 4, 12}, {4, 20, 4, 12}, {8, 20, 4, 12},
 +     {12, 20, 4, 12}, true},
 +};
++
++// Free look, tuned two ways: +-85 degrees of pitch and a yaw axis that stays on
++// world Y are what the Ballance community's own free-camera mod defaults to
++// (360Mode = 0, recorded in docs/free-camera.md) -- copied rather than invented.
++constexpr float kPi = 3.14159265358979f;
++constexpr float kMaxPitch = 85.0f * kPi / 180.0f;
++
++// Body facing. A ball that is resting still jitters by a hundredth of a unit
++// per frame, and a heading taken from that noise would spin Steve on the spot,
++// so the heading is only read above a walking pace (Ballance units/second; the
++// ball is 4 units across). 720 deg/s is two full turns a second, which is fast
++// enough to catch a roll reversing direction without looking like a snap.
++constexpr float kBodyMinSpeed = 0.4f;
++constexpr float kDefaultTurnRate = 720.0f;
 +
 +constexpr int kBoxCount = sizeof(kBoxes) / sizeof(kBoxes[0]);
 +constexpr int kFacesPerBox = 6;
@@ -1303,8 +1354,15 @@ index 0000000..0e032b2
 +CMinecraftSteve::CMinecraftSteve()
 +    : m_Enabled(false), m_Built(false), m_FirstPerson(false), m_UseFixedPosition(false),
 +      m_FollowBall(true), m_Debug(false), m_YawGiven(false), m_LogPending(true), m_DebugTimerReady(false), m_BuildFailed(false), m_Scale(0.25f),
-+      m_FixedYaw(0.0f), m_FixedPosition(0.0f, 0.0f, 0.0f), m_Yaw(0.0f), m_LogTimer(-1.0f), m_BallScanTimer(0.0f),
-+      m_Hide(false), m_HideBall(false), m_HasCamOffset(false), m_CamOffset(0.0f, 0.0f, 0.0f),
++      m_FixedYaw(0.0f), m_FixedPosition(0.0f, 0.0f, 0.0f), m_Yaw(0.0f), m_Pitch(0.0f),
++      m_MouseSumX(0.0f), m_MouseSumY(0.0f), m_MouseFrames(0), m_LogTimer(-1.0f), m_BallScanTimer(0.0f),
++      m_Hide(false), m_HideBall(false), m_HasCamOffset(false), m_Look(true), m_MouseCapture(true),
++      m_MenuGate(true), m_MenuUp(false), m_BodyFacing(true),
++      m_LookSensitivity(0.0025f), m_BodyYaw(0.0f), m_TurnRate(kDefaultTurnRate * kPi / 180.0f),
++      m_HasLastBallPosition(false), m_LastBallPosition(0.0f, 0.0f, 0.0f), m_BodySpeed(0.0f),
++      m_BodyHeading(0.0f), m_SkipLookFrames(0), m_MenuCursor(false), m_MenuPlaying(true),
++      m_CursorArmed(false), m_MenuKeyUp(false), m_EscapeHeld(false), m_MovementHeld(false),
++      m_CamOffset(0.0f, 0.0f, 0.0f),
 +      m_Mesh(nullptr), m_Entity(nullptr), m_Ball(nullptr), m_Camera(nullptr), m_Texture(nullptr),
 +      m_Material(nullptr), m_Height(kModelHeight), m_EyeHeight(kModelEyeHeight) {}
 +
@@ -1357,6 +1415,23 @@ index 0000000..0e032b2
 +            log_line("BALLANCE_MC_STEVE_CAMOFF must be dx,dy,dz (got \"%s\")", camoff);
 +        }
 +    }
++
++    // Look control: the mouse turns the head. On by default because the whole
++    // point of the first-person rig is to be played, not screenshotted; the
++    // acceptance scripts below never move the pointer, so they see no change.
++    if (getenv("BALLANCE_MC_STEVE_LOOK")) m_Look = env_flag("BALLANCE_MC_STEVE_LOOK");
++    m_LookSensitivity = env_float("BALLANCE_MC_STEVE_SENS", m_LookSensitivity);
++    if (getenv("BALLANCE_MC_STEVE_MOUSE")) m_MouseCapture = env_flag("BALLANCE_MC_STEVE_MOUSE");
++
++    // Menus. On by default: a captured pointer cannot click a menu item, and a
++    // menu that cannot be clicked is not a menu.
++    if (getenv("BALLANCE_MC_STEVE_MENU")) m_MenuGate = env_flag("BALLANCE_MC_STEVE_MENU");
++
++    // Body facing. On by default: Steve is the ball, and the ball faces where it
++    // rolls. BALLANCE_MC_STEVE_BODY=0 restores "the body is a second head".
++    if (getenv("BALLANCE_MC_STEVE_BODY")) m_BodyFacing = env_flag("BALLANCE_MC_STEVE_BODY");
++    m_TurnRate = env_float("BALLANCE_MC_STEVE_TURN", kDefaultTurnRate) * kPi / 180.0f;
++    if (m_TurnRate <= 0.0f) m_TurnRate = kDefaultTurnRate * kPi / 180.0f;
 +
 +    const char *yaw = getenv("BALLANCE_MC_STEVE_YAW");
 +    if (yaw && *yaw) {
@@ -1588,8 +1663,12 @@ index 0000000..0e032b2
 +    m_Entity->SetPosition(&target);
 +    if (m_HideBall && m_Ball) m_Ball->Show(CKHIDE);
 +
-+    float yaw = m_YawGiven ? m_FixedYaw : m_Yaw;
-+    const VxVector direction(sinf(yaw), 0.0f, cosf(yaw));
++    UpdateBodyYaw(target, deltaSeconds);
++
++    // The body stays upright: yaw only. Pitch belongs to the head/camera, or
++    // Steve would tip forward when the player looks down.
++    const float bodyYaw = (m_BodyFacing && m_FollowBall) ? m_BodyYaw : m_Yaw;
++    const VxVector direction(sinf(bodyYaw), 0.0f, cosf(bodyYaw));
 +    const VxVector up(0.0f, 1.0f, 0.0f);
 +    m_Entity->SetOrientation(&direction, &up);
 +}
@@ -1617,6 +1696,206 @@ index 0000000..0e032b2
 +    renderContext->SetProjectionTransformationMatrix(projection);
 +}
 +
++// The mouse turns the head. Reads the input manager's *relative* position --
++// the per-frame accumulation of SDL motion deltas (SdlInputManager PreProcess
++// resets it every frame, so lX/lY are already a frame delta, not a cursor
++// coordinate). That matters: a cursor coordinate would stop at the window edge
++// and would jump when the pointer is warped, while a delta does neither.
++//
++// The interface is the same one the game's own mouse-orbit behaviour uses
++// (BuildingBlocks/Cameras/Behaviors/CameraMouseOrbit.cpp), so the sign
++// convention is copied from it: moving the mouse right decreases yaw.
++bool CMinecraftSteve::WantsRelativeMouse() const {
++    return m_Enabled && m_FirstPerson && m_Look && m_MouseCapture && !MenuUp();
++}
++
++// Two candidate signals, both read every frame and both logged, because which
++// one actually flips when Ballance opens its pause menu is a measurement:
++//
++//   * CKContext::IsPlaying() -- false while the context is paused. The player
++//     only pauses around fullscreen switches, so this may never move for the
++//     in-game menu.
++//   * the input manager's cursor visibility -- the game shows the pointer
++//     whenever it wants a click, which is exactly when it must not be captured.
++//
++// Either one being "menu" is enough. When the state flips back the next frame's
++// pointer delta is dropped (m_SkipLookFrames): re-capturing warps the pointer to
++// the window centre, and the delta SDL reports for that warp is not the player
++// moving the mouse.
++// Test hook. Ballance's own pause menu never opens in the headless harness (Esc
++// changes the picture by 32k pixels, but neither IsPlaying nor the cursor flag
++// moves, and the ball keeps rolling), so the gate would be untestable there.
++// This drives the *same* flag through the *same* call the game's Mouse Cursor
++// building block uses -- BuildingBlocks/Interface/Behaviors/MouseCursor.cpp:
++// ShowCursor(FALSE) on "On" (gameplay, the game draws its own pointer) and
++// ShowCursor(TRUE) on "Off" (menu). Everything downstream of the flag is the
++// production path; only the flip is scripted, and only when the env var is set.
++// A key pressed and released inside one frame is invisible to IsKeyDown(): SDL
++// delivers both events before the frame polls, so KS_PRESSED and KS_RELEASED both end
++// up set and PostProcess clears the key, leaving IsKeyDown() false for the whole life
++// of the press. The key buffer keeps every event of the frame until the next
++// PreProcess, so the press is still readable there. GetKeyFromBuffer() is a plain
++// read -- it does not pop -- so scanning it cannot steal keys from the game's own
++// behaviors (EditString, KeyWaiter) that read the same buffer.
++// This is not a test-only path: a fast tap on a real keyboard does the same thing.
++static bool KeyTappedThisFrame(CKInputManager *input, CKDWORD key) {
++    const int count = input->GetNumberOfKeyInBuffer();
++    for (int i = 0; i < count; ++i) {
++        CKDWORD buffered = 0;
++        if (input->GetKeyFromBuffer(i, buffered) == KEY_PRESSED && buffered == key) return true;
++    }
++    return false;
++}
++
++static void ApplyMenuTestHook(CKContext *context) {
++    const char *path = getenv("BALLANCE_MC_STEVE_MENU_TEST");
++    if (!context || !path || !*path) return;
++    CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (!input) return;
++    FILE *file = fopen(path, "r");
++    if (!file) return;
++    const int c = fgetc(file);
++    fclose(file);
++    static int last = -1;
++    if (c != last) {
++        last = c;
++        log_line("menu-test hook: requested cursor %d, now %d", c, input->GetCursorVisibility() ? 1 : 0);
++    }
++    if (c == '0') input->ShowCursor(FALSE);
++    else if (c == '1') input->ShowCursor(TRUE);
++}
++
++void CMinecraftSteve::UpdateMenuState(CKContext *context) {
++    if (!context) return;
++    ApplyMenuTestHook(context);
++
++    m_MenuPlaying = context->IsPlaying() != FALSE;
++    m_MenuCursor = false;
++    CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (input) m_MenuCursor = input->GetCursorVisibility() != FALSE;
++    if (!m_MenuCursor) m_CursorArmed = true;
++
++    if (input) {
++        // IsKeyDown() or the frame's key buffer: a tap that starts and ends between
++        // two frames only shows up in the buffer (see KeyTappedThisFrame).
++        const bool escapeDown = input->IsKeyDown(CKKEY_ESCAPE) != FALSE ||
++                                KeyTappedThisFrame(input, CKKEY_ESCAPE);
++        if (escapeDown && !m_EscapeHeld) {
++            m_MenuKeyUp = !m_MenuKeyUp;
++            log_line("menu key: escape -> %s", m_MenuKeyUp ? "released" : "captured");
++        }
++        m_EscapeHeld = escapeDown;
++
++        const CKDWORD movementKeys[] = {CKKEY_SPACE, CKKEY_UP, CKKEY_DOWN, CKKEY_LEFT,
++                                        CKKEY_RIGHT};
++        bool movementDown = false;
++        for (int i = 0; i < (int)(sizeof(movementKeys) / sizeof(movementKeys[0])); ++i)
++            movementDown = movementDown || input->IsKeyDown(movementKeys[i]) != FALSE ||
++                           KeyTappedThisFrame(input, movementKeys[i]);
++        if (m_MenuKeyUp && movementDown && !m_MovementHeld) {
++            m_MenuKeyUp = false;
++            log_line("menu key: movement -> captured");
++        }
++        m_MovementHeld = movementDown;
++    }
++
++    // Two independent signals, because either can be the one that moves:
++    //   * CKContext::IsPlaying() -- false while the context is paused (the player
++    //     pauses around fullscreen switches).
++    //   * the cursor flag -- but only after the game has hidden the cursor at
++    //     least once. It starts TRUE and nobody touches it until the Mouse
++    //     Cursor behavior runs, so an untouched TRUE means "no information",
++    //     and reading it as "a menu is up" would refuse to capture the pointer
++    //     for the whole session.
++    // Three ways to be in a menu, and the key is the one that works in this port:
++    // SdlInputManager::ShowCursor() pins the cursor flag to TRUE unless
++    // BALLANCE_SPRITE_CURSOR=1 (the port cannot draw the game's own cursor
++    // sprite, so the OS pointer has to stay available for menus to be
++    // clickable). That makes "the game is showing a menu cursor" unusable as a
++    // signal here, and Escape is what actually opens the menu.
++    const bool menuUp = m_MenuKeyUp || !m_MenuPlaying || (m_CursorArmed && m_MenuCursor);
++    if (menuUp == m_MenuUp) return;
++    m_MenuUp = menuUp;
++    if (!menuUp) m_SkipLookFrames = 1;
++    log_line("menu %s: cursor %d armed %d playing %d -> pointer %s", menuUp ? "up" : "gone",
++             m_MenuCursor ? 1 : 0, m_CursorArmed ? 1 : 0, m_MenuPlaying ? 1 : 0,
++             menuUp ? "released" : "captured");
++}
++
++// Body yaw follows the heading of travel, not the camera: the ball rolls one
++// way and the head looks another.
++//
++// A fixed position (BALLANCE_MC_STEVE_POS), or following switched off, has no
++// motion to follow, so the body keeps the head's yaw -- which is what every
++// screenshot run in tools/steve/ was taken with.
++void CMinecraftSteve::UpdateBodyYaw(const VxVector &target, float deltaSeconds) {
++    if (!(m_BodyFacing && m_FollowBall)) {
++        m_BodyYaw = m_Yaw;
++        m_HasLastBallPosition = false;
++        m_BodySpeed = 0.0f;
++        return;
++    }
++    if (!m_HasLastBallPosition) {
++        m_BodyYaw = m_Yaw;
++        m_LastBallPosition = target;
++        m_HasLastBallPosition = true;
++        m_BodySpeed = 0.0f;
++        return;
++    }
++
++    const float dx = target.x - m_LastBallPosition.x;
++    const float dz = target.z - m_LastBallPosition.z;
++    m_LastBallPosition = target;
++    const float travel = sqrtf(dx * dx + dz * dz);
++    m_BodySpeed = deltaSeconds > 0.0f ? travel / deltaSeconds : 0.0f;
++    if (m_BodySpeed < kBodyMinSpeed) return;
++
++    const float want = atan2f(dx, dz);
++    m_BodyHeading = want;
++    float diff = want - m_BodyYaw;
++    while (diff > kPi) diff -= 2.0f * kPi;
++    while (diff < -kPi) diff += 2.0f * kPi;
++    // Rate limited so a teleport (a fall reset, a warp) turns Steve over a
++    // couple of frames instead of snapping 180 degrees in one.
++    const float maxStep = m_TurnRate * deltaSeconds;
++    if (diff > maxStep) diff = maxStep;
++    if (diff < -maxStep) diff = -maxStep;
++    m_BodyYaw += diff;
++    while (m_BodyYaw > kPi) m_BodyYaw -= 2.0f * kPi;
++    while (m_BodyYaw < -kPi) m_BodyYaw += 2.0f * kPi;
++}
++
++void CMinecraftSteve::UpdateLook(CKContext *context) {
++    if (!m_Look || !context) return;
++    // Nothing to undo while a menu is up: the input manager zeroes its relative
++    // accumulators every PreProcess, so a delta that is not read here is a delta
++    // that is gone. The xdotool-driven test in tools/steve/menu_shots.sh checks
++    // exactly that -- the same 200 px that turns the head by 28.6 deg outside the
++    // menu has to move it by 0.0 inside it.
++    if (MenuUp()) return;
++    if (m_SkipLookFrames > 0) { --m_SkipLookFrames; return; }
++    // The player already keeps this manager (GamePlayer::m_InputManager) and it is
++    // not reachable off CKContext, so look it up the same way the player does.
++    CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (!input) return;
++    VxVector displacement(0.0f, 0.0f, 0.0f);
++    input->GetMouseRelativePosition(displacement);
++    if (displacement.x == 0.0f && displacement.y == 0.0f) return;
++
++    m_MouseSumX += displacement.x;
++    m_MouseSumY += displacement.y;
++    ++m_MouseFrames;
++
++    m_Yaw -= displacement.x * m_LookSensitivity;
++    m_Pitch -= displacement.y * m_LookSensitivity;
++    if (m_Pitch > kMaxPitch) m_Pitch = kMaxPitch;
++    if (m_Pitch < -kMaxPitch) m_Pitch = -kMaxPitch;
++    // Keep yaw bounded so the log stays readable and float error cannot creep in
++    // over an hour of play.
++    while (m_Yaw > kPi) m_Yaw -= 2.0f * kPi;
++    while (m_Yaw < -kPi) m_Yaw += 2.0f * kPi;
++}
++
 +void CMinecraftSteve::ApplyFirstPersonCamera(CKRenderContext *renderContext) {
 +    if (!m_Camera || !m_Entity || !renderContext) return;
 +
@@ -1624,7 +1903,10 @@ index 0000000..0e032b2
 +    m_Entity->GetPosition(&eye);
 +    eye.y += m_EyeHeight;
 +
-+    const VxVector forward(sinf(m_Yaw), 0.0f, cosf(m_Yaw));
++    // World-Y yaw plus clamped pitch, the community default. World up stays the
++    // up vector: with |pitch| <= 85 degrees it is never parallel to forward.
++    const float cosPitch = cosf(m_Pitch);
++    const VxVector forward(sinf(m_Yaw) * cosPitch, sinf(m_Pitch), cosf(m_Yaw) * cosPitch);
 +    const VxVector up(0.0f, 1.0f, 0.0f);
 +
 +    m_Camera->SetPosition(&eye);
@@ -1688,7 +1970,35 @@ index 0000000..0e032b2
 +    m_LogTimer = 0.0f;
 +    VxVector position(0.0f, 0.0f, 0.0f);
 +    if (m_Entity) m_Entity->GetPosition(&position);
-+    log_line("at (%.1f, %.1f, %.1f) yaw %.1f", position.x, position.y, position.z, m_Yaw);
++    log_line("at (%.1f, %.1f, %.1f) yaw %.1f pitch %.1f",
++             position.x, position.y, position.z, m_Yaw * 180.0f / kPi, m_Pitch * 180.0f / kPi);
++    // What the camera actually ended up pointing at. Angles in a field are not
++    // evidence that the camera uses them; this line is.
++    if (m_Camera) {
++        VxVector dir(0.0f, 0.0f, 0.0f);
++        VxVector up(0.0f, 1.0f, 0.0f);
++        m_Camera->GetOrientation(&dir, &up);
++        log_line("camera dir (%+.3f, %+.3f, %+.3f) up (%+.3f, %+.3f, %+.3f)",
++                 dir.x, dir.y, dir.z, up.x, up.y, up.z);
++    }
++    // Proof of life for the look path: mouse deltas that reached us during the
++    // last second, and how many frames they arrived in. d(0, 0) over 0 frames
++    // means "nothing was delivered", which is a different bug from "delivered,
++    // but too small to see".
++    log_line("look: mouse d(%+.0f, %+.0f) in %d frame(s), sens %.4f rad/px",
++             m_MouseSumX, m_MouseSumY, m_MouseFrames, m_LookSensitivity);
++    // Both candidate menu signals, printed whether or not they gate anything:
++    // "menu up" only means something if these two numbers are the ones that
++    // moved. Body line pairs the heading it is showing with the heading it was
++    // asked for, so a stuck body is distinguishable from a body that is simply
++    // standing still (speed 0 means no new heading was taken).
++    log_line("state: cursor %d armed %d playing %d key %d menu %d | body yaw %.1f want %.1f speed %.2f",
++             m_MenuCursor ? 1 : 0, m_CursorArmed ? 1 : 0, m_MenuPlaying ? 1 : 0,
++             m_MenuKeyUp ? 1 : 0, MenuUp() ? 1 : 0,
++             m_BodyYaw * 180.0f / kPi, m_BodyHeading * 180.0f / kPi, m_BodySpeed);
++    m_MouseSumX = 0.0f;
++    m_MouseSumY = 0.0f;
++    m_MouseFrames = 0;
 +
 +    // The player ball is whatever moves. Everything in the level file is welded
 +    // in place, so a second-by-second diff of every 3D entity names it without
@@ -1727,6 +2037,8 @@ index 0000000..0e032b2
 +        m_DebugTimerReady = true;
 +    }
 +    FindBall(context, deltaSeconds);
++    UpdateMenuState(context);
++    UpdateLook(context);
 +    UpdatePlacement(context, deltaSeconds);
 +    if (m_FirstPerson) ApplyFirstPersonCamera(renderContext);
 +    else if (m_HasCamOffset) ApplyOffsetCamera(renderContext);
@@ -1763,10 +2075,10 @@ index 0000000..0e032b2
 +}
 diff --git a/src/MinecraftSteve.h b/src/MinecraftSteve.h
 new file mode 100644
-index 0000000..8981204
+index 0000000..be69da6
 --- /dev/null
 +++ b/src/MinecraftSteve.h
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,166 @@
 +#ifndef PLAYER_MINECRAFTSTEVE_H
 +#define PLAYER_MINECRAFTSTEVE_H
 +
@@ -1794,6 +2106,18 @@ index 0000000..8981204
 +//   BALLANCE_MC_STEVE_YAW=deg  fixed yaw, overrides the ball heading
 +//   BALLANCE_MC_STEVE_SCALE=f  Ballance units per model unit (default 1)
 +//   BALLANCE_MC_STEVE_FP=1     park the camera at Steve's eyes
++//   BALLANCE_MC_STEVE_LOOK=0   ignore the mouse (look control is on by default)
++//   BALLANCE_MC_STEVE_SENS=f   radians of yaw/pitch per mouse pixel (default 0.0025)
++//   BALLANCE_MC_STEVE_MOUSE=0  do not capture the pointer (look still reads deltas)
++//   BALLANCE_MC_STEVE_MENU=0   keep the pointer captured while a menu is up
++//                               (Escape would then no longer release it)
++//   BALLANCE_MC_STEVE_MENU_TEST=<file>  test hook: '0' hides the game cursor,
++//                               '1' shows it -- the same call the game's own
++//                               Mouse Cursor building block makes, so the menu
++//                               gate can be exercised where Ballance's pause
++//                               menu never opens (see tools/steve/menu_shots.sh)
++//   BALLANCE_MC_STEVE_BODY=0   body keeps the head's yaw instead of the heading
++//   BALLANCE_MC_STEVE_TURN=f   max body turn rate, degrees per second (default 720)
 +//   BALLANCE_MC_STEVE_DEBUG=1  once a second, log what it found and where it is
 +class CMinecraftSteve {
 +public:
@@ -1806,11 +2130,28 @@ index 0000000..8981204
 +
 +    bool Enabled() const { return m_Enabled; }
 +
++    // Why the gate is in here and not in the player: the player only ever
++    // released the pointer on focus loss. Ballance's own pause menu never
++    // touches player state (CKContext::Pause is called around fullscreen
++    // switches only), so "a menu is up" has to be read from the game -- see
++    // UpdateMenuState.
++    bool MenuUp() const { return m_MenuGate && m_MenuUp; }
++
++    // First person + look means the pointer has to be *captured*: an uncaptured
++    // pointer stops at the window edge, and so do the deltas (measured
++    // 2026-11-04: 640x480 window, 200px of travel bought 28.6 degrees and then
++    // nothing at all). The player owns the SDL_Window, so it asks instead of
++    // reaching for it here.
++    bool WantsRelativeMouse() const;
++
 +private:
 +    bool ReadEnvironment();
 +    bool Build(CKContext *context);
 +    void UpdatePlacement(CKContext *context, float deltaSeconds);
 +    void FindBall(CKContext *context, float deltaSeconds);
++    void UpdateLook(CKContext *context);
++    void UpdateMenuState(CKContext *context);
++    void UpdateBodyYaw(const VxVector &target, float deltaSeconds);
 +    void ApplyFirstPersonCamera(CKRenderContext *renderContext);
 +    void ApplyOffsetCamera(CKRenderContext *renderContext);
 +    void DebugLog(CKContext *context, float deltaSeconds);
@@ -1828,6 +2169,11 @@ index 0000000..8981204
 +    bool m_Hide;
 +    bool m_HideBall;
 +    bool m_HasCamOffset;
++    bool m_Look;
++    bool m_MouseCapture;
++    bool m_MenuGate;
++    bool m_MenuUp;
++    bool m_BodyFacing;
 +
 +    VxVector m_CamOffset;
 +
@@ -1835,6 +2181,52 @@ index 0000000..8981204
 +    float m_FixedYaw;
 +    VxVector m_FixedPosition;
 +    float m_Yaw;
++    // Pitch is the second half of "the mouse turns the head": yaw alone can only
++    // pan. Radians, clamped to +-85 degrees, the default the Ballance community
++    // settled on for free look (360Mode = 0, see docs/free-camera.md).
++    float m_Pitch;
++    float m_LookSensitivity;
++
++    // Two headings, on purpose. m_Yaw is the head's: it is what the mouse
++    // writes and what the first-person camera uses. m_BodyYaw is the body's: it
++    // follows the direction the ball is actually rolling. With one shared
++    // angle, looking sideways while rolling would swing the whole model around,
++    // and the body would keep pointing where the camera points instead of where
++    // it is going.
++    float m_BodyYaw;
++    float m_TurnRate;
++    bool m_HasLastBallPosition;
++    VxVector m_LastBallPosition;
++    float m_BodySpeed;
++    float m_BodyHeading;
++
++    // Frame(s) of pointer motion to drop right after the pointer is recaptured:
++    // SDL warps it to the window centre on capture, and the first delta it
++    // reports can be measured against where the pointer used to be.
++    int m_SkipLookFrames;
++
++    // Read from the game once per frame, logged with the rest (see DebugLog):
++    // which of the two is the real "a menu is up" signal is a measurement, not
++    // a guess.
++    bool m_MenuCursor;
++    bool m_MenuPlaying;
++    // The cursor flag is only believed once the game has driven it at least once
++    // (see UpdateMenuState): a flag that has never moved means "nobody told us",
++    // which is not the same statement as "a menu is up".
++    bool m_CursorArmed;
++    // Escape is the game's own menu key, so it is also the release key: the
++    // player presses it to open the pause menu and again to resume, and that is
++    // exactly the state the pointer has to follow. Pressing a movement key while
++    // released means "back in the game" -- which covers resuming from the pause
++    // menu by clicking Resume instead of pressing Escape.
++    bool m_MenuKeyUp;
++    bool m_EscapeHeld;
++    bool m_MovementHeld;
++    // Aggregated every frame, logged and cleared once a second by DebugLog: the
++    // only way to tell "the mouse is not reaching us" from "the mouse moved 0".
++    float m_MouseSumX;
++    float m_MouseSumY;
++    int m_MouseFrames;
 +    float m_LogTimer;
 +    float m_BallScanTimer;
 +    std::map<CK3dEntity *, VxVector> m_LastPositions;

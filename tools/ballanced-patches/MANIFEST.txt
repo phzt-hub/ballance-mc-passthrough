@@ -10,3 +10,7 @@ submodule: Source/RenderEngine
 base_commit: 049c78b3daa81b4a47d68932c6123d03ab3b3bdd
 files: 4
 
+
+submodule: Source/Managers/SdlInputManager
+base_commit: 368d414378410ddeb4a0e42e523f86c90b842a68
+files: 2

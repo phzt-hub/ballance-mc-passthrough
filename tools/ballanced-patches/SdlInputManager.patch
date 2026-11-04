@@ -1,0 +1,74 @@
+diff --git a/Cursor.cpp b/Cursor.cpp
+index e3cbd48..296ea9b 100644
+--- a/Cursor.cpp
++++ b/Cursor.cpp
+@@ -1,9 +1,31 @@
+ #include "SdlInputManager.h"
+ 
++#include <cstdlib>
++
+ #include "VxWindowFunctions.h"
+ 
++// Port fix: a Virtools game that uses the "Mouse Cursor" building block hides
++// the OS pointer and paints its own sprite from a post-sprite render callback
++// (BuildingBlocks/Interface/Behaviors/MouseCursor.cpp). That sprite path does
++// not land on screen in this SDL/GL port, so a hidden pointer is simply an
++// invisible pointer -- and the push-button building block refuses to arm while
++// GetCursorVisibility() is FALSE (it tests the visibility before letting a
++// click through). The whole menu then becomes unclickable.
++// Until the sprite cursor is ported, keep the OS pointer on and report it as
++// visible. BALLANCE_SPRITE_CURSOR=1 restores the original behaviour.
++static CKBOOL KeepSystemCursorVisible()
++{
++    static const CKBOOL keep = [] {
++        const char *env = std::getenv("BALLANCE_SPRITE_CURSOR");
++        return CKBOOL(!(env && *env != '\0' && *env != '0'));
++    }();
++    return keep;
++}
++
+ void SdlInputManager::ShowCursor(CKBOOL iShow)
+ {
++    if (KeepSystemCursorVisible())
++        iShow = TRUE;
+     m_ShowCursor = iShow;
+     EnsureCursorVisible(iShow);
+ }
+diff --git a/SdlInputManager.cpp b/SdlInputManager.cpp
+index d0bc949..4a00878 100644
+--- a/SdlInputManager.cpp
++++ b/SdlInputManager.cpp
+@@ -1,5 +1,8 @@
+ #include "SdlInputManager.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
++
+ #define SDLINPUT_DEFAULT_MAX_JOYSTICKS 16
+ #define SDLINPUT_HARD_MAX_JOYSTICKS 256
+ 
+@@ -1018,6 +1021,24 @@ CKERROR SdlInputManager::OnCKPlay()
+ 
+ bool SDLCALL SdlInputManager::ObserveEvent(void *userdata, SDL_Event *event) {
+     SdlInputManager *manager = static_cast<SdlInputManager *>(userdata);
++    // BALLANCE_INPUT_DEBUG=1: one line per pointer event, printed *before* the
++    // window/pause filters, so "the event never arrived" and "it arrived and was
++    // dropped" stop looking the same from the outside.
++    static const bool trace = getenv("BALLANCE_INPUT_DEBUG") != nullptr;
++    if (trace && (event->type == SDL_EVENT_MOUSE_MOTION ||
++                  event->type == SDL_EVENT_WINDOW_FOCUS_GAINED ||
++                  event->type == SDL_EVENT_WINDOW_FOCUS_LOST ||
++                  event->type == SDL_EVENT_WINDOW_MOUSE_ENTER ||
++                  event->type == SDL_EVENT_WINDOW_MOUSE_LEAVE)) {
++        char what[64] = {0};
++        SDL_GetEventDescription(event, what, (int)sizeof(what));
++        fprintf(stderr, "[input-debug] %s win=%u input=%u xrel=%.1f yrel=%.1f paused=%d\n",
++                what,
++                (event->type == SDL_EVENT_MOUSE_MOTION) ? event->motion.windowID : event->window.windowID,
++                manager->m_InputWindow, event->motion.xrel, event->motion.yrel,
++                (int)manager->m_Paused);
++        fflush(stderr);
++    }
+     const bool keyboard = event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP;
+     const bool mouse = event->type >= SDL_EVENT_MOUSE_MOTION && event->type <= SDL_EVENT_MOUSE_WHEEL;
+     const bool gamepad = event->type >= SDL_EVENT_GAMEPAD_AXIS_MOTION && event->type <= SDL_EVENT_GAMEPAD_STEAM_HANDLE_UPDATED;

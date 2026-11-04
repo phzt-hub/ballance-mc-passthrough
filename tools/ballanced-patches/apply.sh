@@ -16,7 +16,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${BALLANCE_ROOT:-$HOME/src/Ballanced}"
-MODULES=(Source/Player Source/BuildingBlocks Source/RenderEngine)
+MODULES=(Source/Player Source/BuildingBlocks Source/RenderEngine Source/Managers/SdlInputManager)
 
 base_for() {
     awk -v want="$1" '
