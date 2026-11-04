@@ -1,0 +1,6 @@
+#!/bin/bash
+# mcmod 工程专用 wrapper：强制用 Java 25 跑 Gradle。
+# 原因：~/.gradle/gradle.properties 全局 pin 了 java-21（给 Android 工程），
+# 而 fabric-loom 1.18+ 要求 daemon 本身就是 Java 25+。
+cd "$(dirname "$0")"
+exec ./gradlew -Dorg.gradle.java.home=/usr/lib/jvm/jdk-25.0.4.1-oracle-x64 "$@"

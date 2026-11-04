@@ -1,3 +1,23 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index e051c92..d82722c 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -39,6 +39,7 @@ endif ()
+ set(PLAYER_HEADERS
+         StaticPlugins.h
+         GamePlayer.h
++        MinecraftSteve.h
+         GameConfig.h
+         PlayerOptions.h
+         PlayerSdlShortcuts.h
+@@ -52,6 +53,7 @@ set(PLAYER_HEADERS
+ set(PLAYER_SOURCES
+         Player.cpp
+         GamePlayer.cpp
++        MinecraftSteve.cpp
+         GameConfig.cpp
+         PlayerOptions.cpp
+         PlayerSdlShortcuts.cpp
 diff --git a/src/GameConfig.h b/src/GameConfig.h
 index 347ca16..4bc5d2e 100644
 --- a/src/GameConfig.h
@@ -11,10 +31,10 @@ index 347ca16..4bc5d2e 100644
  
  #define GAMECONFIG_PATH_FIELDS \
 diff --git a/src/GamePlayer.cpp b/src/GamePlayer.cpp
-index 4ffa776..886febb 100644
+index 4ffa776..316f8c6 100644
 --- a/src/GamePlayer.cpp
 +++ b/src/GamePlayer.cpp
-@@ -382,6 +382,451 @@ bool CGamePlayer::Load(const char *filename)
+@@ -382,6 +382,978 @@ bool CGamePlayer::Load(const char *filename)
      return FinishLoad(filename, resolvedFile.CStr());
  }
  
@@ -282,6 +302,466 @@ index 4ffa776..886febb 100644
 +                             frame, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
 +}
 +
++// Input probe: does the X pointer reach the game at all? The menu is driven by
++// TT PushButton2, which needs (a) the mouse position the engine reports and
++// (b) the left button going down while the cursor is over the button sprite.
++// Neither is visible from outside, so log both.
++//
++//   BALLANCE_POC_INPUTLOG=<n>   every n-th render call (n<1 -> 30)
++static void Poc1InputLog(CKContext *ctx, CKRenderContext *rc)
++{
++    static int calls = 0;
++    ++calls;
++
++    const char *spec = getenv("BALLANCE_POC_INPUTLOG");
++    if (!spec || !ctx)
++        return;
++
++    int every = atoi(spec);
++    if (every < 1)
++        every = 30;
++    if (calls % every)
++        return;
++
++    CKInputManager *im = (CKInputManager *)ctx->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (!im)
++    {
++        CLogger::Get().Debug("PoC input %d: no input manager", calls);
++        return;
++    }
++
++    Vx2DVector rel, abs;
++    im->GetMousePosition(rel, FALSE);
++    im->GetMousePosition(abs, TRUE);
++
++    const char *picked = "(none)";
++    if (rc)
++    {
++        VxRect screen;
++        rc->GetWindowRect(screen, FALSE);
++        Vx2DVector p = rel;
++        p += screen.GetTopLeft();
++        CKObject *o = rc->Pick2D(p);
++        if (o && o->GetName())
++            picked = o->GetName();
++        else if (o)
++            picked = "(unnamed)";
++    }
++
++    CLogger::Get().Debug("PoC input %d: rel=(%.1f %.1f) abs=(%.1f %.1f) left=%d clicked=%d vis=%d pick2d=%s",
++                         calls, rel.x, rel.y, abs.x, abs.y,
++                         im->IsMouseButtonDown(CK_MOUSEBUTTON_LEFT),
++                         im->IsMouseClicked(CK_MOUSEBUTTON_LEFT),
++                         im->GetCursorVisibility(), picked);
++}
++
++// The menu's TT PushButton2 only reacts while the input manager says the cursor
++// is visible: ShowCursor(FALSE) is what the "Mouse Cursor" building block does
++// when it draws its own sprite cursor, and in the SDL port that sprite never
++// reaches the screen -- so the menu ends up with no cursor and no clicks.
++// BALLANCE_POC_CURSOR=1 puts the system cursor back.
++static void Poc1ForceCursor(CKContext *ctx)
++{
++    if (!ctx || !getenv("BALLANCE_POC_CURSOR"))
++        return;
++    CKInputManager *im = (CKInputManager *)ctx->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (im && !im->GetCursorVisibility())
++        im->ShowCursor(TRUE);
++}
++
++// PoC script dump: every behavioral object in the context, its scripts, and
++// the scripts' input/output pins.
++//
++// Written for one question: base.cmo already carries the gameplay scripts
++// (Gameplay_Ingame Script and friends), so a merged level does not lack a
++// script -- it lacks a trigger. This dump says which object owns each script
++// and which input pin has to be activated to start it.
++//
++//   BALLANCE_POC_DUMPSCRIPT=1   dump at LoadLevel() entry and at exit
++
++#include <string.h>
++
++static bool PocScriptWanted(const char *name)
++{
++    static const char *const kWords[] = {
++        "Gameplay", "Menu", "Load", "Level", "Start", "Play", "Ball", "Cam",
++        "Intro", "Sector", "Tutorial", "Events", "Refresh", "Pause", "Dead",
++        "End", "Highscore", "Unpause", "Exit", "reset", "next", "Default",
++        "Build", "Sound", "Ballsound"
++    };
++    if (!name)
++        return false;
++    for (size_t i = 0; i < sizeof(kWords) / sizeof(kWords[0]); ++i)
++        if (strstr(name, kWords[i]))
++            return true;
++    return false;
++}
++
++void PocDumpScripts(CKContext *context, const char *phase)
++{
++    if (!context || !getenv("BALLANCE_POC_DUMPSCRIPT"))
++        return;
++
++    const char *label = phase ? phase : "?";
++    CLogger::Get().Debug("PoC script dump (%s): begin", label);
++
++    const XObjectPointerArray all = context->GetObjectListByType(CKCID_BEOBJECT, TRUE);
++    int withScripts = 0;
++    int dumped = 0;
++    for (CKObject **it = all.Begin(); it != all.End(); ++it)
++    {
++        CKObject *obj = *it;
++        if (!obj)
++            continue;
++        CKBeObject *beo = (CKBeObject *)obj;
++        const int count = beo->GetScriptCount();
++        if (count <= 0)
++            continue;
++        ++withScripts;
++        const char *oname = obj->GetName() ? obj->GetName() : "(unnamed)";
++        const bool interestingOwner = PocScriptWanted(oname);
++        for (int s = 0; s < count; ++s)
++        {
++            CKBehavior *beh = beo->GetScript(s);
++            if (!beh)
++                continue;
++            const char *bname = beh->GetName() ? beh->GetName() : "(unnamed)";
++            if (!interestingOwner && !PocScriptWanted(bname) && dumped >= 250)
++                continue;
++            CLogger::Get().Debug("PoC script: owner='%s' cid=%d script='%s' cid=%d flags=0x%08x in=%d out=%d params=%d",
++                                 oname, obj->GetClassID(), bname, beh->GetClassID(),
++                                 (unsigned)beh->GetFlags(), beh->GetInputCount(),
++                                 beh->GetOutputCount(), beh->GetInputParameterCount());
++            for (int i = 0; i < beh->GetInputCount(); ++i)
++            {
++                CKBehaviorIO *io = beh->GetInput(i);
++                if (!io)
++                    continue;
++                CLogger::Get().Debug("    in[%d] '%s' active=%d", i,
++                                     io->GetName() ? io->GetName() : "(unnamed)", (int)io->IsActive());
++            }
++            for (int i = 0; i < beh->GetOutputCount(); ++i)
++            {
++                CKBehaviorIO *io = beh->GetOutput(i);
++                if (!io)
++                    continue;
++                CLogger::Get().Debug("    out[%d] '%s' active=%d", i,
++                                     io->GetName() ? io->GetName() : "(unnamed)", (int)io->IsActive());
++            }
++            for (int i = 0; i < beh->GetInputParameterCount(); ++i)
++            {
++                CKObject *p = beh->GetInputParameterObject(i);
++                if (!p)
++                    continue;
++                CLogger::Get().Debug("    param[%d] '%s' cid=%d", i,
++                                     p->GetName() ? p->GetName() : "(unnamed)", p->GetClassID());
++            }
++            ++dumped;
++        }
++    }
++    CLogger::Get().Debug("PoC script dump (%s): %d object(s) with scripts, %d script(s) dumped",
++                         label, withScripts, dumped);
++}
++
++// Frame-gated variant: base.cmo alone never calls LoadLevel(), so the menu
++// composition has to be sampled while it runs. Dumps once at frame
++// BALLANCE_POC_DUMPSCRIPT_FRAME (default 90, when the menu has finished
++// loading its NMOs).
++void PocDumpScriptsAuto(CKContext *context)
++{
++    if (!context || !getenv("BALLANCE_POC_DUMPSCRIPT"))
++        return;
++
++    static int frame = 0;
++    ++frame;
++    const char *spec = getenv("BALLANCE_POC_DUMPSCRIPT_FRAME");
++    const int target = spec ? atoi(spec) : 90;
++    if (frame != target)
++        return;
++
++    PocDumpScripts(context, "auto");
++}
++
++// Dump the 2D layer (menu buttons, labels) so a headless run can find where the
++// "Start" button is and click it with xdotool.
++//
++// Why this matters: the Ballance menu is a 3D scene with a rotating camera and a
++// 2D interface on top. Nothing in the .cmo starts a level by itself -- a click on
++// the menu does. Without the click the composition just spins forever, which is
++// exactly what every --level run so far showed.
++//
++//   BALLANCE_POC_DUMP2D=1            dump once
++//   BALLANCE_POC_DUMP2D_FRAME=n      at render call n (default 200)
++//   BALLANCE_POC_DUMP2D_ALL=1        include hidden entities (default: only visible)
++
++static void PocDump2DAuto(CKContext *ctx)
++{
++    static int calls = 0;
++
++    ++calls;
++    if (!ctx || !getenv("BALLANCE_POC_DUMP2D"))
++        return;
++
++    // Frame list, so one run can show the menu before and after a click:
++    // BALLANCE_POC_DUMP2D_FRAME=200,600,900
++    const char *frameSpec = getenv("BALLANCE_POC_DUMP2D_FRAME");
++    bool wanted = false;
++    if (!frameSpec || !*frameSpec)
++    {
++        wanted = (calls >= 200);
++    }
++    else
++    {
++        const char *p = frameSpec;
++        while (*p)
++        {
++            while (*p == ',' || *p == ' ')
++                ++p;
++            if (!*p)
++                break;
++            char *end = NULL;
++            const long v = strtol(p, &end, 10);
++            if (end == p)
++                break;
++            if (v == calls)
++                wanted = true;
++            p = end;
++            if (calls > v && *p != ',')
++                break;
++        }
++    }
++    if (!wanted)
++        return;
++
++    const bool dumpAll = getenv("BALLANCE_POC_DUMP2D_ALL") != NULL;
++
++    const XObjectPointerArray list = ctx->GetObjectListByType(CKCID_2DENTITY, TRUE);
++    int shown = 0;
++    CLogger::Get().Debug("PoC 2d dump at render call %d: %d 2d object(s)%s",
++                         calls, list.Size(), dumpAll ? " (including hidden)" : "");
++    for (CKObject **it = list.Begin(); it != list.End(); ++it)
++    {
++        CK2dEntity *ent = (CK2dEntity *)*it;
++        if (!ent)
++            continue;
++        if (!dumpAll && !ent->IsVisible())
++            continue;
++
++        Vx2DVector pos, size, hpos, hsize;
++        ent->GetPosition(pos, FALSE, NULL);
++        ent->GetSize(size, FALSE);
++        ent->GetPosition(hpos, TRUE, NULL);
++        ent->GetSize(hsize, TRUE);
++
++        const char *text = "";
++        if (ent->GetClassID() == CKCID_SPRITETEXT)
++        {
++            CKSTRING t = ((CKSpriteText *)ent)->GetText();
++            text = (t && *t) ? t : "";
++        }
++
++        CLogger::Get().Debug("PoC 2d: id=%d cid=%d name='%s' text='%s' vis=%d z=%d pos=(%.1f %.1f) size=(%.1f %.1f) hom=(%.4f %.4f)%s%.4f %.4f)",
++                             ent->GetID(), (int)ent->GetClassID(),
++                             ent->GetName() ? ent->GetName() : "(unnamed)", text,
++                             ent->IsVisible() ? 1 : 0, ent->GetZOrder(),
++                             pos.x, pos.y, size.x, size.y, hpos.x, hpos.y, "/(", hsize.x, hsize.y);
++        ++shown;
++    }
++    CLogger::Get().Debug("PoC 2d dump: %d object(s) listed", shown);
++}
++
++// BALLANCE_POC_START_LEVEL -- fire the level start-up scripts by hand.
++//
++// Merging a level's geometry only adds meshes to the scene: the scripts that
++// actually start a level sit on objects base.cmo already owns, and their Start
++// input is inactive. CKContext::Play() only calls CKLevel::ActivateAllScript()
++// when the context was reset, and an initial load is not a reset -- so nothing
++// ever fires them, and the menu camera keeps flying over the merged geometry.
++//
++// The chain mode fires only the level start-up scripts, leaving the composition
++// loaders (Loading_Manager, Object Load, Delete_*) alone: they would try to load
++// the level NMOs a second time.
++static bool PocLevelStartWanted(const char *name, const char *owner)
++{
++    static const char *const chain[] = {
++        "levelinit", "level_init", "gameplay_init", "balls_init", "init ballpieces",
++        "animtrafo_init", "menulevel_init", "default level", "gameplay_refresh",
++    };
++
++    for (size_t i = 0; i < sizeof(chain) / sizeof(chain[0]); ++i)
++    {
++        const char *patterns[2] = { name, owner };
++        for (int p = 0; p < 2; ++p)
++        {
++            if (!patterns[p])
++                continue;
++            const size_t len = strlen(patterns[p]);
++            const size_t plen = strlen(chain[i]);
++            for (size_t s = 0; s + plen <= len; ++s)
++            {
++                size_t k = 0;
++                while (k < plen &&
++                       tolower((unsigned char)patterns[p][s + k]) == (unsigned char)chain[i][k])
++                    ++k;
++                if (k == plen)
++                    return true;
++            }
++        }
++    }
++    return false;
++}
++
++static void PocLevelStartScripts(CKContext *ctx, CKLevel *level, const char *spec)
++{
++    if (!ctx || !level || !spec || !*spec || strcmp(spec, "0") == 0)
++        return;
++
++    const bool all = (strcmp(spec, "all") == 0);
++    CKScene *scene = ctx->GetCurrentScene();
++    CKBehaviorManager *bm = ctx->GetBehaviorManager();
++
++    int seen = 0, fired = 0;
++    const XObjectPointerArray beos = ctx->GetObjectListByType(CKCID_BEOBJECT, TRUE);
++    for (CKObject **it = beos.Begin(); it != beos.End(); ++it)
++    {
++        CKBeObject *beo = (CKBeObject *)*it;
++        if (!beo)
++            continue;
++
++        const int scripts = beo->GetScriptCount();
++        for (int i = 0; i < scripts; ++i)
++        {
++            CKBehavior *script = beo->GetScript(i);
++            if (!script || script->GetType() != CKBEHAVIORTYPE_SCRIPT)
++                continue;
++
++            const char *name = script->GetName();
++            const char *owner = beo->GetName();
++            ++seen;
++
++            const bool wanted = all || PocLevelStartWanted(name, owner);
++            CLogger::Get().Debug("PoC start-level: %s script '%s' on '%s'",
++                                 wanted ? "activate" : "skip",
++                                 name ? name : "(unnamed)", owner ? owner : "(unnamed)");
++            if (!wanted)
++                continue;
++
++            // Activate(TRUE, TRUE) == Reset() then the active flag; Reset() clears
++            // every IO and, for a script, re-arms the Start input (in[0]).
++            script->Activate(TRUE, TRUE);
++            if (bm)
++                bm->AddObject(beo);
++            if (scene && beo->IsInScene(scene))
++                scene->SetObjectFlags((CKSceneObject *)beo,
++                                      (CK_SCENEOBJECT_FLAGS)CK_SCENEOBJECT_ACTIVE);
++            ++fired;
++        }
++    }
++
++    CLogger::Get().Debug("PoC start-level '%s': %d of %d script(s) fired", spec, fired, seen);
++}
++
++
++// The menu owns the camera: its scripts re-attach Cam_MenuLevel every frame, so a
++// level that starts underneath them is still framed by the menu path. Switching
++// them off is what lets the gameplay camera show up. BALLANCE_POC_STOP_MENU=1.
++static void PocLevelStopMenu(CKContext *ctx);
++
++// Deferred pass. At LoadLevel() time the menu has only just started: the groups
++// that own the gameplay scripts (All_Gameplay, All_Balls, All_Levelinit, ...) are
++// pulled in by Loading_Manager over the next second, so a chain fired right after
++// the merge sees 9 scripts at most. Fire the chain once more when the menu has
++// settled -- BALLANCE_POC_START_FRAME (default 120) render calls after start.
++static void PocLevelStartAuto(CKContext *ctx)
++{
++    static int calls = 0;
++    static bool done = false;
++
++    ++calls;
++    if (done || !ctx)
++        return;
++
++    const char *spec = getenv("BALLANCE_POC_START_LEVEL");
++    if (!spec || !*spec || strcmp(spec, "0") == 0)
++        return;
++
++    const char *frameSpec = getenv("BALLANCE_POC_START_FRAME");
++    const int startFrame = (frameSpec && *frameSpec) ? atoi(frameSpec) : 120;
++    if (calls < startFrame)
++        return;
++
++    CKLevel *level = ctx->GetCurrentLevel();
++    if (!level)
++        return;
++
++    CLogger::Get().Debug("PoC start-level: deferred pass at render call %d", calls);
++    PocLevelStartScripts(ctx, level, spec);
++    PocLevelStopMenu(ctx);
++    done = true;
++}
++
++static bool PocNameHas(const char *name, const char *needle)
++{
++    if (!name || !needle || !*needle)
++        return false;
++    const size_t len = strlen(name);
++    const size_t nlen = strlen(needle);
++    for (size_t s = 0; s + nlen <= len; ++s)
++    {
++        size_t k = 0;
++        while (k < nlen && tolower((unsigned char)name[s + k]) == tolower((unsigned char)needle[k]))
++            ++k;
++        if (k == nlen)
++            return true;
++    }
++    return false;
++}
++
++static void PocLevelStopMenu(CKContext *ctx)
++{
++    // Called every frame: latch only once something was actually stopped, so the
++    // very first frames (nothing loaded yet) do not consume the single attempt.
++    static bool latched = false;
++    if (latched || !ctx || !getenv("BALLANCE_POC_STOP_MENU"))
++        return;
++
++    CKBehaviorManager *bm = ctx->GetBehaviorManager();
++    int stopped = 0;
++    const XObjectPointerArray beos = ctx->GetObjectListByType(CKCID_BEOBJECT, TRUE);
++    for (CKObject **it = beos.Begin(); it != beos.End(); ++it)
++    {
++        CKBeObject *beo = (CKBeObject *)*it;
++        if (!beo)
++            continue;
++
++        const char *owner = beo->GetName();
++        const bool menuOwner = PocNameHas(owner, "menu");
++        const int scripts = beo->GetScriptCount();
++
++        for (int i = 0; i < scripts; ++i)
++        {
++            CKBehavior *script = beo->GetScript(i);
++            if (!script || script->GetType() != CKBEHAVIORTYPE_SCRIPT)
++                continue;
++            if (!menuOwner && !PocNameHas(script->GetName(), "menu"))
++                continue;
++            script->Activate(FALSE, FALSE);
++            ++stopped;
++            CLogger::Get().Debug("PoC stop-menu: stopped script '%s' on '%s'",
++                                 script->GetName() ? script->GetName() : "(unnamed)",
++                                 owner ? owner : "(unnamed)");
++            if (bm)
++                bm->RemoveObjectNextFrame(beo);
++        }
++    }
++
++    if (stopped > 0)
++    {
++        latched = true;
++        CLogger::Get().Debug("PoC stop-menu: %d menu script(s) stopped", stopped);
++    }
++}
++
 +bool CGamePlayer::LoadLevel(const char *filename)
 +{
 +    if (!filename || (*filename) == '\0')
@@ -300,13 +780,6 @@ index 4ffa776..886febb 100644
 +        return false;
 +    }
 +
-+    XString resolvedFile = filename;
-+    if (pm->ResolveFileName(resolvedFile, DATA_PATH_IDX) != CK_OK)
-+    {
-+        CLogger::Get().Error("Failed to resolve level file %s", filename);
-+        return false;
-+    }
-+
 +    CKLevel *level = m_CKContext->GetCurrentLevel();
 +    if (!level)
 +    {
@@ -315,6 +788,8 @@ index 4ffa776..886febb 100644
 +    }
 +
 +    CKScene *scene = m_CKContext->GetCurrentScene();
++
++    PocDumpScripts(m_CKContext, "entry");
 +
 +    // Snapshot of what the composition already owns. The PoC hides it so a dumped
 +    // frame shows the level file alone instead of the menu drawn on top of it.
@@ -325,65 +800,131 @@ index 4ffa776..886febb 100644
 +            preexisting.PushBack(*it);
 +    }
 +
-+    CKObjectArray *array = CreateCKObjectArray();
-+    if (!array)
-+    {
-+        CLogger::Get().Error("Failed to create CKObjectArray!");
-+        return false;
-+    }
-+
 +    const int before = m_CKContext->GetObjectCount();
 +
-+    // A Ballance level .NMO carries no CKLevel of its own: the level object, the
-+    // managers and the gameplay scripts all live in base.cmo, and the original
-+    // player merges a level into that composition. So the context is not reset.
-+    CKERROR res = m_CKContext->Load(resolvedFile.Str(), array,
-+                                    (CK_LOAD_FLAGS)(CK_LOAD_DEFAULT | CK_LOAD_CHECKDEPENDENCIES));
-+    if (res != CK_OK)
++    // Files to merge. A level .NMO carries only geometry: the level object, the
++    // managers and the gameplay scripts live in base.cmo, and the gameplay logic
++    // itself lives in Gameplay.nmo -- so merging the level geometry alone never
++    // starts a level. BALLANCE_POC_NMO names the support NMOs (Levelinit / Gameplay
++    // / Camera / Intro) to merge alongside the level, comma separated.
++    char extraSpec[4096];
++    extraSpec[0] = 0;
++    const char *envExtra = getenv("BALLANCE_POC_NMO");
++    if (envExtra && *envExtra)
 +    {
-+        CLogger::Get().Error("Failed to load level file: %s (0x%08x)", resolvedFile.CStr(), res);
-+        DeleteCKObjectArray(array);
-+        return false;
++        strncpy(extraSpec, envExtra, sizeof(extraSpec) - 1);
++        extraSpec[sizeof(extraSpec) - 1] = 0;
++    }
++
++    char fileNames[16][2048];
++    int fileCount = 0;
++    fileNames[fileCount][0] = 0;
++    strncpy(fileNames[fileCount], filename, sizeof(fileNames[0]) - 1);
++    fileNames[fileCount][sizeof(fileNames[0]) - 1] = 0;
++    ++fileCount;
++
++    char *segment = extraSpec;
++    while (*segment && fileCount < 16)
++    {
++        char *comma = strchr(segment, ',');
++        if (comma) *comma = 0;
++        size_t len = strlen(segment);
++        while (len > 0 && (segment[len - 1] == ' ' || segment[len - 1] == '\t' ||
++                           segment[len - 1] == '\r' || segment[len - 1] == '\n'))
++            segment[--len] = 0;
++        size_t start = 0;
++        while (segment[start] == ' ' || segment[start] == '\t') ++start;
++        if (segment[start])
++        {
++            strncpy(fileNames[fileCount], segment + start, sizeof(fileNames[0]) - 1);
++            fileNames[fileCount][sizeof(fileNames[0]) - 1] = 0;
++            ++fileCount;
++        }
++        if (!comma) break;
++        segment = comma + 1;
 +    }
 +
 +    int attached = 0;
 +    int named = 0;
-+    for (array->Reset(); !array->EndOfList(); array->Next())
++    int mergedFiles = 0;
++
++    for (int f = 0; f < fileCount; ++f)
 +    {
-+        CKObject *obj = array->GetData(m_CKContext);
-+        if (!obj)
-+            continue;
-+
-+        if (!CKIsChildClassOf(obj, CKCID_BEOBJECT))
-+            continue;
-+
-+        level->AddObject(obj);
-+        if (scene && CKIsChildClassOf(obj, CKCID_SCENEOBJECT))
-+            scene->AddObject((CKSceneObject *)obj);
-+        // CKScene::Init() registers the scene's render objects with the render
-+        // contexts only when a scene is launched, and the scene we merged into was
-+        // launched long before these objects existed -- so register them by hand.
-+        if (CKIsChildClassOf(obj, CKCID_RENDEROBJECT))
-+            m_RenderContext->AddObjectWithHierarchy((CKRenderObject *)obj);
-+        Poc1NoteMerged(obj);
-+        ++attached;
-+
-+        if (named < 8 && obj->GetName())
++        XString resolvedFile = fileNames[f];
++        if (pm->ResolveFileName(resolvedFile, DATA_PATH_IDX) != CK_OK)
 +        {
-+            const char *vis = "?";
-+            if (CKIsChildClassOf(obj, CKCID_3DENTITY))
-+                vis = ((CK3dEntity *)obj)->IsVisible() ? "visible" : "hidden";
-+            else if (CKIsChildClassOf(obj, CKCID_2DENTITY))
-+                vis = ((CK2dEntity *)obj)->IsVisible() ? "visible" : "hidden";
-+            CLogger::Get().Debug("  level object: %s (cid %d, %s, attached=%d)", obj->GetName(), obj->GetClassID(), vis,
-+                                 CKIsChildClassOf(obj, CKCID_RENDEROBJECT) ? (int)m_RenderContext->IsObjectAttached((CKRenderObject *)obj) : -1);
-+            ++named;
++            if (f == 0)
++            {
++                CLogger::Get().Error("Failed to resolve level file %s", fileNames[f]);
++                return false;
++            }
++            CLogger::Get().Warn("PoC could not resolve NMO '%s' (skipped)", fileNames[f]);
++            continue;
 +        }
-+    }
-+    DeleteCKObjectArray(array);
 +
-+    CLogger::Get().Debug("Merged '%s' into level '%s': %d object(s), context %d -> %d object(s), scene %s",
-+                         resolvedFile.CStr(),
++        CKObjectArray *array = CreateCKObjectArray();
++        if (!array)
++        {
++            CLogger::Get().Error("Failed to create CKObjectArray!");
++            return false;
++        }
++
++        // A Ballance level .NMO carries no CKLevel of its own: the level object, the
++        // managers and the gameplay scripts all live in base.cmo, and the original
++        // player merges a level into that composition. So the context is not reset.
++        CKERROR res = m_CKContext->Load(resolvedFile.Str(), array,
++                                        (CK_LOAD_FLAGS)(CK_LOAD_DEFAULT | CK_LOAD_CHECKDEPENDENCIES));
++        if (res != CK_OK)
++        {
++            CLogger::Get().Error("Failed to load NMO '%s': 0x%08x (skipped)", resolvedFile.CStr(), res);
++            DeleteCKObjectArray(array);
++            if (f == 0)
++                return false;
++            continue;
++        }
++
++        int fileAttached = 0;
++        for (array->Reset(); !array->EndOfList(); array->Next())
++        {
++            CKObject *obj = array->GetData(m_CKContext);
++            if (!obj)
++                continue;
++
++            if (!CKIsChildClassOf(obj, CKCID_BEOBJECT))
++                continue;
++
++            level->AddObject(obj);
++            if (scene && CKIsChildClassOf(obj, CKCID_SCENEOBJECT))
++                scene->AddObject((CKSceneObject *)obj);
++            // CKScene::Init() registers the scene's render objects with the render
++            // contexts only when a scene is launched, and the scene we merged into was
++            // launched long before these objects existed -- so register them by hand.
++            if (CKIsChildClassOf(obj, CKCID_RENDEROBJECT))
++                m_RenderContext->AddObjectWithHierarchy((CKRenderObject *)obj);
++            Poc1NoteMerged(obj);
++            ++attached;
++            ++fileAttached;
++
++            if (named < 8 && obj->GetName())
++            {
++                const char *vis = "?";
++                if (CKIsChildClassOf(obj, CKCID_3DENTITY))
++                    vis = ((CK3dEntity *)obj)->IsVisible() ? "visible" : "hidden";
++                else if (CKIsChildClassOf(obj, CKCID_2DENTITY))
++                    vis = ((CK2dEntity *)obj)->IsVisible() ? "visible" : "hidden";
++                CLogger::Get().Debug("  level object: %s (cid %d, %s, attached=%d)", obj->GetName(), obj->GetClassID(), vis,
++                                     CKIsChildClassOf(obj, CKCID_RENDEROBJECT) ? (int)m_RenderContext->IsObjectAttached((CKRenderObject *)obj) : -1);
++                ++named;
++            }
++        }
++        DeleteCKObjectArray(array);
++        ++mergedFiles;
++
++        CLogger::Get().Debug("Merged '%s': %d object(s)", resolvedFile.CStr(), fileAttached);
++    }
++
++    CLogger::Get().Debug("Merged %d NMO file(s) into level '%s': %d object(s), context %d -> %d object(s), scene %s",
++                         mergedFiles,
 +                         level->GetName() ? level->GetName() : "(unnamed)",
 +                         attached, before, m_CKContext->GetObjectCount(),
 +                         scene ? "present" : "absent");
@@ -392,6 +933,12 @@ index 4ffa776..886febb 100644
 +    // (CKScene::Init -> CKRenderContext::AddObject) and activates their scripts;
 +    // adding them to the level alone is not enough to get them drawn.
 +    level->LaunchScene(NULL);
++
++    // LaunchScene() calls CKBehaviorManager::RemoveAllObjects(), so the scripts
++    // have to be fired after it, never before.
++    PocLevelStartScripts(m_CKContext, level, getenv("BALLANCE_POC_START_LEVEL"));
++
++    PocDumpScripts(m_CKContext, "exit");
 +
 +    const CKBOOL isolate = getenv("BALLANCE_POC_ISOLATE") != NULL;
 +    if (isolate)
@@ -466,20 +1013,52 @@ index 4ffa776..886febb 100644
  void CGamePlayer::Run()
  {
      while (Update())
-@@ -471,6 +916,8 @@ void CGamePlayer::Process()
+@@ -471,6 +1443,23 @@ void CGamePlayer::Process()
  
  void CGamePlayer::Render()
  {
 +    Poc1ApplyCameraPin(m_CKContext, m_RenderContext);
++    PocLevelStartAuto(m_CKContext);
++    PocLevelStopMenu(m_CKContext);
 +    Poc1FrameLog(m_CKContext, m_RenderContext);
++    Poc1ForceCursor(m_CKContext);
++    Poc1InputLog(m_CKContext, m_RenderContext);
++    PocDumpScriptsAuto(m_CKContext);
++    PocDump2DAuto(m_CKContext);
++    {
++        // Steve is placed through the normal scene graph, so it is drawn by
++        // the game's own 3D pass and therefore depth tested against the track.
++        static Uint64 lastTicks = 0;
++        const Uint64 nowTicks = SDL_GetTicks();
++        const float elapsed = lastTicks ? (float)(nowTicks - lastTicks) / 1000.0f : 0.0f;
++        lastTicks = nowTicks;
++        m_Steve.Frame(m_CKContext, m_RenderContext, elapsed);
++    }
      m_RenderContext->Render();
  }
  
+@@ -485,6 +1474,8 @@ void CGamePlayer::Shutdown()
+         m_GameInfo = NULL;
+     }
+ 
++    m_Steve.Shutdown(m_CKContext);
++
+     ShutdownEngine();
+     ShutdownWindow();
+ 
 diff --git a/src/GamePlayer.h b/src/GamePlayer.h
-index 3b54c38..2b63b9a 100644
+index 3b54c38..1543654 100644
 --- a/src/GamePlayer.h
 +++ b/src/GamePlayer.h
-@@ -19,6 +19,7 @@ public:
+@@ -4,6 +4,7 @@
+ #include "CKAll.h"
+ 
+ #include "GameConfig.h"
++#include "MinecraftSteve.h"
+ 
+ struct SDL_Window;
+ 
+@@ -19,6 +20,7 @@ public:
  
      bool Init(const CGameConfig &config);
      bool Init(const CGameConfig &runtimeConfig, const CGameConfig &persistentConfig);
@@ -487,6 +1066,793 @@ index 3b54c38..2b63b9a 100644
      bool Load(const char *filename = NULL);
  
      void Run();
+@@ -135,6 +137,10 @@ private:
+     bool m_AltF4ShortcutDown;
+     CGameConfig m_Config;
+     CGameConfig m_PersistentConfig;
++
++    // Steve in the Ballance world (see MinecraftSteve.h). Off unless
++    // BALLANCE_MC_STEVE is set.
++    CMinecraftSteve m_Steve;
+ };
+ 
+ #endif /* PLAYER_GAMEPLAYER_H */
+diff --git a/src/MinecraftSteve.cpp b/src/MinecraftSteve.cpp
+new file mode 100644
+index 0000000..0e032b2
+--- /dev/null
++++ b/src/MinecraftSteve.cpp
+@@ -0,0 +1,678 @@
++#include "MinecraftSteve.h"
++
++#include <map>
++
++#include <math.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++namespace {
++
++constexpr int kSkinWidth = 64;
++constexpr int kSkinHeight = 32;
++
++// The classic 64x32 player skin puts every box on one atlas. Rectangles are
++// given in pixels as x, y, w, h and are read off the layout Mojang shipped with
++// the "Steve" default skin, so a real steve.png would drop straight in.
++struct UvRect {
++    int x, y, w, h;
++};
++
++struct BoxSpec {
++    float minX, maxX, minY, maxY, minZ, maxZ;
++    UvRect top, bottom, right, front, left, back;
++    bool mirror; // left limbs reuse the right limb's pixels, flipped in u
++};
++
++const BoxSpec kBoxes[] = {
++    // head: 8x8x8 at the top of the 32 unit tall model
++    {-4.0f, 4.0f, 24.0f, 32.0f, -4.0f, 4.0f,
++     {8, 0, 8, 8}, {16, 0, 8, 8}, {0, 8, 8, 8}, {8, 8, 8, 8}, {16, 8, 8, 8}, {24, 8, 8, 8},
++     false},
++    // body: 8 wide, 12 tall, 4 deep
++    {-4.0f, 4.0f, 12.0f, 24.0f, -2.0f, 2.0f,
++     {20, 16, 8, 4}, {28, 16, 8, 4}, {16, 20, 4, 12}, {20, 20, 8, 12}, {28, 20, 4, 12},
++     {32, 20, 8, 12}, false},
++    // right arm (+x side)
++    {4.0f, 8.0f, 12.0f, 24.0f, -2.0f, 2.0f,
++     {44, 16, 4, 4}, {48, 16, 4, 4}, {40, 20, 4, 12}, {44, 20, 4, 12}, {48, 20, 4, 12},
++     {52, 20, 4, 12}, false},
++    // left arm, mirrored from the right one
++    {-8.0f, -4.0f, 12.0f, 24.0f, -2.0f, 2.0f,
++     {44, 16, 4, 4}, {48, 16, 4, 4}, {40, 20, 4, 12}, {44, 20, 4, 12}, {48, 20, 4, 12},
++     {52, 20, 4, 12}, true},
++    // right leg
++    {0.0f, 4.0f, 0.0f, 12.0f, -2.0f, 2.0f,
++     {4, 16, 4, 4}, {8, 16, 4, 4}, {0, 20, 4, 12}, {4, 20, 4, 12}, {8, 20, 4, 12},
++     {12, 20, 4, 12}, false},
++    // left leg, mirrored
++    {-4.0f, 0.0f, 0.0f, 12.0f, -2.0f, 2.0f,
++     {4, 16, 4, 4}, {8, 16, 4, 4}, {0, 20, 4, 12}, {4, 20, 4, 12}, {8, 20, 4, 12},
++     {12, 20, 4, 12}, true},
++};
++
++constexpr int kBoxCount = sizeof(kBoxes) / sizeof(kBoxes[0]);
++constexpr int kFacesPerBox = 6;
++constexpr int kVerticesPerFace = 4;
++
++// Model units above: 16 per block, so Steve is 32 units (1.8 blocks) tall.
++constexpr float kModelHeight = 32.0f;
++constexpr float kModelEyeHeight = 28.0f;
++
++// Skin colours, ARGB in memory order (b, g, r, a written bytewise below).
++struct Rgb {
++    unsigned char r, g, b;
++};
++
++constexpr Rgb kSkin{198, 141, 107};
++constexpr Rgb kHair{74, 46, 25};
++constexpr Rgb kEyeWhite{235, 235, 235};
++constexpr Rgb kEyeIris{70, 60, 160};
++constexpr Rgb kMouth{120, 74, 60};
++constexpr Rgb kNose{176, 122, 90};
++constexpr Rgb kShirt{0, 168, 170};
++constexpr Rgb kSleeve{0, 150, 152};
++constexpr Rgb kPants{56, 68, 168};
++constexpr Rgb kShoe{78, 78, 78};
++
++void fill_rect(unsigned char *pixels, int x0, int y0, int w, int h, Rgb color) {
++    for (int y = y0; y < y0 + h; ++y) {
++        if (y < 0 || y >= kSkinHeight) continue;
++        for (int x = x0; x < x0 + w; ++x) {
++            if (x < 0 || x >= kSkinWidth) continue;
++            unsigned char *p = pixels + ((size_t)y * kSkinWidth + (size_t)x) * 4u;
++            p[0] = color.b;
++            p[1] = color.g;
++            p[2] = color.r;
++            p[3] = 255;
++        }
++    }
++}
++
++void plot(unsigned char *pixels, int x, int y, Rgb color) {
++    fill_rect(pixels, x, y, 1, 1, color);
++}
++
++// Paints the classic default skin: skin tone, brown hair, a face, a cyan
++// shirt, blue trousers and grey shoes. Deliberately hand drawn rather than
++// copied, so the repository carries no Mojang assets.
++void paint_skin(unsigned char *pixels) {
++    memset(pixels, 0, (size_t)kSkinWidth * kSkinHeight * 4u);
++
++    // Head: skin everywhere, then hair on the top, back and the upper sides.
++    fill_rect(pixels, 8, 8, 8, 8, kSkin);    // front
++    fill_rect(pixels, 0, 8, 8, 8, kSkin);    // right side
++    fill_rect(pixels, 16, 8, 8, 8, kSkin);   // left side
++    fill_rect(pixels, 24, 8, 8, 8, kHair);   // back
++    fill_rect(pixels, 8, 0, 8, 8, kHair);    // top
++    fill_rect(pixels, 16, 0, 8, 8, kHair);   // bottom (unseen)
++
++    // Hair fringe across the top of the face and over the upper side panels.
++    fill_rect(pixels, 8, 8, 8, 2, kHair);
++    fill_rect(pixels, 0, 8, 8, 2, kHair);
++    fill_rect(pixels, 16, 8, 8, 2, kHair);
++    // Sideburns.
++    plot(pixels, 8, 10, kHair);
++    plot(pixels, 15, 10, kHair);
++
++    // Eyes sit two pixels above the middle of the face block.
++    plot(pixels, 9, 12, kEyeWhite);
++    plot(pixels, 10, 12, kEyeIris);
++    plot(pixels, 13, 12, kEyeIris);
++    plot(pixels, 14, 12, kEyeWhite);
++    plot(pixels, 10, 13, kNose);
++    plot(pixels, 13, 13, kNose);
++    // Mouth.
++    fill_rect(pixels, 10, 14, 4, 1, kMouth);
++
++    // Body: cyan shirt on every face.
++    fill_rect(pixels, 20, 20, 8, 12, kShirt);  // front
++    fill_rect(pixels, 32, 20, 8, 12, kShirt);  // back
++    fill_rect(pixels, 16, 20, 4, 12, kShirt);  // right
++    fill_rect(pixels, 28, 20, 4, 12, kShirt);  // left
++    fill_rect(pixels, 20, 16, 8, 4, kShirt);   // top
++    fill_rect(pixels, 28, 16, 8, 4, kShirt);   // bottom
++
++    // Both arms: sleeve, then bare hands at the bottom two rows.
++    const int armRects[2][4] = {{40, 20, 4, 12}, {44, 20, 4, 12}};
++    for (int i = 0; i < 2; ++i) {
++        fill_rect(pixels, armRects[i][0], armRects[i][1], armRects[i][2], armRects[i][3],
++                  kSleeve);
++    }
++    fill_rect(pixels, 48, 20, 4, 12, kSleeve);
++    fill_rect(pixels, 52, 20, 4, 12, kSleeve);
++    fill_rect(pixels, 44, 16, 4, 4, kSleeve);
++    fill_rect(pixels, 48, 16, 4, 4, kSleeve);
++    // Hands: last two rows of each arm column.
++    fill_rect(pixels, 40, 30, 4, 2, kSkin);
++    fill_rect(pixels, 44, 30, 4, 2, kSkin);
++    fill_rect(pixels, 48, 30, 4, 2, kSkin);
++    fill_rect(pixels, 52, 30, 4, 2, kSkin);
++
++    // Both legs: trousers, shoes at the bottom.
++    fill_rect(pixels, 0, 20, 4, 12, kPants);
++    fill_rect(pixels, 4, 20, 4, 12, kPants);
++    fill_rect(pixels, 8, 20, 4, 12, kPants);
++    fill_rect(pixels, 12, 20, 4, 12, kPants);
++    fill_rect(pixels, 4, 16, 4, 4, kPants);
++    fill_rect(pixels, 8, 16, 4, 4, kPants);
++    fill_rect(pixels, 0, 30, 4, 2, kShoe);
++    fill_rect(pixels, 4, 30, 4, 2, kShoe);
++    fill_rect(pixels, 8, 30, 4, 2, kShoe);
++    fill_rect(pixels, 12, 30, 4, 2, kShoe);
++}
++
++float env_float(const char *name, float fallback) {
++    const char *value = getenv(name);
++    if (!value || !*value) return fallback;
++    return (float)atof(value);
++}
++
++bool env_flag(const char *name) {
++    const char *value = getenv(name);
++    if (!value || !*value) return false;
++    if (!strcmp(value, "0") || !strcmp(value, "off") || !strcmp(value, "false") ||
++        !strcmp(value, "no"))
++        return false;
++    return true;
++}
++
++void log_line(const char *fmt, ...) {
++    char buffer[512];
++    va_list args;
++    va_start(args, fmt);
++    vsnprintf(buffer, sizeof(buffer), fmt, args);
++    va_end(args);
++    fprintf(stderr, "[mc-steve] %s\n", buffer);
++    fflush(stderr);
++}
++
++// "Ball", "Ball_01", "ball01"... but not "PE_Balloon_01" (a balloon is not a
++// ball) and not the level's own P_Ball_* pickups, which never move.
++bool name_is_ball(const char *name) {
++    if (!name) return false;
++    if (name[0] == 'P' && name[1] == '_') return false;
++    for (const char *p = name; *p; ++p) {
++        if ((p[0] == 'b' || p[0] == 'B') && (p[1] == 'a' || p[1] == 'A') &&
++            (p[2] == 'l' || p[2] == 'L') && (p[3] == 'l' || p[3] == 'L')) {
++            // ...oon / ...ot: different objects that merely start with "ball"
++            return !(p[4] == 'o' || p[4] == 'O');
++        }
++    }
++    return false;
++}
++
++// Texture coordinates of one atlas rectangle, with the top of the rectangle at
++// v0 because Virtools puts v=0 at the top of the bitmap.
++void rect_uv(const UvRect &r, float &u0, float &v0, float &u1, float &v1) {
++    u0 = (float)r.x / (float)kSkinWidth;
++    u1 = (float)(r.x + r.w) / (float)kSkinWidth;
++    v0 = (float)r.y / (float)kSkinHeight;
++    v1 = (float)(r.y + r.h) / (float)kSkinHeight;
++}
++
++} // namespace
++
++CMinecraftSteve::CMinecraftSteve()
++    : m_Enabled(false), m_Built(false), m_FirstPerson(false), m_UseFixedPosition(false),
++      m_FollowBall(true), m_Debug(false), m_YawGiven(false), m_LogPending(true), m_DebugTimerReady(false), m_BuildFailed(false), m_Scale(0.25f),
++      m_FixedYaw(0.0f), m_FixedPosition(0.0f, 0.0f, 0.0f), m_Yaw(0.0f), m_LogTimer(-1.0f), m_BallScanTimer(0.0f),
++      m_Hide(false), m_HideBall(false), m_HasCamOffset(false), m_CamOffset(0.0f, 0.0f, 0.0f),
++      m_Mesh(nullptr), m_Entity(nullptr), m_Ball(nullptr), m_Camera(nullptr), m_Texture(nullptr),
++      m_Material(nullptr), m_Height(kModelHeight), m_EyeHeight(kModelEyeHeight) {}
++
++CMinecraftSteve::~CMinecraftSteve() {}
++
++bool CMinecraftSteve::ReadEnvironment() {
++    m_Enabled = env_flag("BALLANCE_MC_STEVE");
++    if (!m_Enabled) return false;
++
++    m_FirstPerson = env_flag("BALLANCE_MC_STEVE_FP");
++    m_Debug = env_flag("BALLANCE_MC_STEVE_DEBUG");
++    m_Scale = env_float("BALLANCE_MC_STEVE_SCALE", 0.25f);
++    if (m_Scale <= 0.0f) m_Scale = 0.25f;
++    m_Height = kModelHeight * m_Scale;
++    m_EyeHeight = kModelEyeHeight * m_Scale;
++
++    const char *pos = getenv("BALLANCE_MC_STEVE_POS");
++    if (pos && *pos) {
++        float x = 0, y = 0, z = 0;
++        if (sscanf(pos, "%f,%f,%f", &x, &y, &z) == 3) {
++            m_FixedPosition = VxVector(x, y, z);
++            m_UseFixedPosition = true;
++        } else {
++            log_line("BALLANCE_MC_STEVE_POS must be x,y,z (got \"%s\")", pos);
++        }
++    }
++    // Following the ball is the default; BALLANCE_MC_STEVE_BALL=0 opts out and
++    // an explicit position always wins over the ball.
++    if (getenv("BALLANCE_MC_STEVE_BALL") && !env_flag("BALLANCE_MC_STEVE_BALL"))
++        m_FollowBall = false;
++    if (m_UseFixedPosition) m_FollowBall = false;
++
++    // Control frames: build and steer everything but do not draw Steve, so a
++    // diff against the same pose isolates his own pixels.
++    m_Hide = env_flag("BALLANCE_MC_STEVE_HIDE");
++
++    // Steve stands *in* the ball, so for a clean shot the ball itself goes
++    // away and he is the thing that rolls.
++    m_HideBall = env_flag("BALLANCE_MC_STEVE_HIDEBALL");
++
++    // A camera that rides along with the ball: offset relative to Steve's feet,
++    // so the shot stays framed while the ball rolls down the level.
++    const char *camoff = getenv("BALLANCE_MC_STEVE_CAMOFF");
++    if (camoff && *camoff) {
++        float x = 0, y = 0, z = 0;
++        if (sscanf(camoff, "%f,%f,%f", &x, &y, &z) == 3) {
++            m_CamOffset = VxVector(x, y, z);
++            m_HasCamOffset = true;
++        } else {
++            log_line("BALLANCE_MC_STEVE_CAMOFF must be dx,dy,dz (got \"%s\")", camoff);
++        }
++    }
++
++    const char *yaw = getenv("BALLANCE_MC_STEVE_YAW");
++    if (yaw && *yaw) {
++        m_FixedYaw = env_float("BALLANCE_MC_STEVE_YAW", 0.0f);
++        m_Yaw = m_FixedYaw;
++        m_YawGiven = true;
++    }
++    return true;
++}
++
++bool CMinecraftSteve::Build(CKContext *context) {
++    if (!context) return false;
++
++    // 1. The skin atlas, painted in memory so no file or image codec is needed.
++    m_Texture = (CKTexture *)context->CreateObject(CKCID_TEXTURE, "SteveSkin");
++    if (!m_Texture) {
++        log_line("CreateObject(CKCID_TEXTURE) failed");
++        return false;
++    }
++    m_Texture->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    if (!m_Texture->CreateImage(kSkinWidth, kSkinHeight, 32)) {
++        log_line("CreateImage failed");
++        return false;
++    }
++    // GetImageDesc() always reports a null Image here: the pixels live in the
++    // bitmap slot, and LockSurfacePtr is the documented way to reach them.
++    CKBYTE *pixels = m_Texture->LockSurfacePtr(0);
++    if (!pixels) {
++        log_line("LockSurfacePtr failed");
++        return false;
++    }
++    paint_skin(pixels);
++    m_Texture->ReleaseSurfacePtr(0);
++    m_Texture->SetUserMipMapMode(FALSE);
++    m_Texture->FreeVideoMemory();
++
++    // 2. One material for the whole model.
++    m_Material = (CKMaterial *)context->CreateObject(CKCID_MATERIAL, "SteveMaterial");
++    if (!m_Material) {
++        log_line("CreateObject(CKCID_MATERIAL) failed");
++        return false;
++    }
++    m_Material->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    m_Material->SetTexture(0, m_Texture);
++    m_Material->SetTwoSided(TRUE);
++    m_Material->SetDiffuse(VxColor(1.0f, 1.0f, 1.0f, 1.0f));
++    m_Material->SetSpecular(VxColor(0.0f, 0.0f, 0.0f, 1.0f));
++
++    // 3. The mesh: six boxes, four vertices per face so every face owns its
++    //    own rectangle of the atlas and its own flat normal.
++    CKMesh *mesh = (CKMesh *)context->CreateObject(CKCID_MESH, "SteveMesh");
++    if (!mesh) {
++        log_line("CreateObject(CKCID_MESH) failed");
++        return false;
++    }
++    mesh->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    m_Mesh = mesh;
++
++    const int vertexCount = kBoxCount * kFacesPerBox * kVerticesPerFace;
++    const int faceCount = kBoxCount * kFacesPerBox * 2;
++    if (!mesh->SetVertexCount(vertexCount) || !mesh->SetFaceCount(faceCount)) {
++        log_line("SetVertexCount/SetFaceCount failed");
++        return false;
++    }
++
++    int vertex = 0;
++    int face = 0;
++    for (int b = 0; b < kBoxCount; ++b) {
++        const BoxSpec &box = kBoxes[b];
++        for (int f = 0; f < kFacesPerBox; ++f) {
++            VxVector corners[4];
++            VxVector normal(0.0f, 0.0f, 0.0f);
++            UvRect rect = box.front;
++
++            switch (f) {
++            case 0: // +x
++                corners[0] = VxVector(box.maxX, box.minY, box.maxZ);
++                corners[1] = VxVector(box.maxX, box.minY, box.minZ);
++                corners[2] = VxVector(box.maxX, box.maxY, box.minZ);
++                corners[3] = VxVector(box.maxX, box.maxY, box.maxZ);
++                normal = VxVector(1.0f, 0.0f, 0.0f);
++                rect = box.right;
++                break;
++            case 1: // -x
++                corners[0] = VxVector(box.minX, box.minY, box.minZ);
++                corners[1] = VxVector(box.minX, box.minY, box.maxZ);
++                corners[2] = VxVector(box.minX, box.maxY, box.maxZ);
++                corners[3] = VxVector(box.minX, box.maxY, box.minZ);
++                normal = VxVector(-1.0f, 0.0f, 0.0f);
++                rect = box.left;
++                break;
++            case 2: // -z (the front of the model, where the face is)
++                corners[0] = VxVector(box.minX, box.minY, box.minZ);
++                corners[1] = VxVector(box.maxX, box.minY, box.minZ);
++                corners[2] = VxVector(box.maxX, box.maxY, box.minZ);
++                corners[3] = VxVector(box.minX, box.maxY, box.minZ);
++                normal = VxVector(0.0f, 0.0f, -1.0f);
++                rect = box.front;
++                break;
++            case 3: // +z
++                corners[0] = VxVector(box.maxX, box.minY, box.maxZ);
++                corners[1] = VxVector(box.minX, box.minY, box.maxZ);
++                corners[2] = VxVector(box.minX, box.maxY, box.maxZ);
++                corners[3] = VxVector(box.maxX, box.maxY, box.maxZ);
++                normal = VxVector(0.0f, 0.0f, 1.0f);
++                rect = box.back;
++                break;
++            case 4: // +y (top)
++                corners[0] = VxVector(box.minX, box.maxY, box.maxZ);
++                corners[1] = VxVector(box.maxX, box.maxY, box.maxZ);
++                corners[2] = VxVector(box.maxX, box.maxY, box.minZ);
++                corners[3] = VxVector(box.minX, box.maxY, box.minZ);
++                normal = VxVector(0.0f, 1.0f, 0.0f);
++                rect = box.top;
++                break;
++            default: // -y (bottom)
++                corners[0] = VxVector(box.minX, box.minY, box.minZ);
++                corners[1] = VxVector(box.maxX, box.minY, box.minZ);
++                corners[2] = VxVector(box.maxX, box.minY, box.maxZ);
++                corners[3] = VxVector(box.minX, box.minY, box.maxZ);
++                normal = VxVector(0.0f, -1.0f, 0.0f);
++                rect = box.bottom;
++                break;
++            }
++
++            float u0, v0, u1, v1;
++            rect_uv(rect, u0, v0, u1, v1);
++            if (box.mirror) {
++                const float swap = u0;
++                u0 = u1;
++                u1 = swap;
++            }
++
++            // corners[0] is bottom left, [1] bottom right, [2] top right,
++            // [3] top left as seen from outside each face.
++            const float us[4] = {u0, u1, u1, u0};
++            const float vs[4] = {v1, v1, v0, v0};
++
++            const int base = vertex;
++            for (int i = 0; i < 4; ++i) {
++                VxVector position = corners[i];
++                mesh->SetVertexPosition(vertex, &position);
++                mesh->SetVertexNormal(vertex, &normal);
++                mesh->SetVertexTextureCoordinates(vertex, us[i], vs[i]);
++                mesh->SetVertexColor(vertex, RGBAFTOCOLOR(1.0f, 1.0f, 1.0f, 1.0f));
++                mesh->SetVertexSpecularColor(vertex, 0);
++                ++vertex;
++            }
++            mesh->SetFaceVertexIndex(face, base + 0, base + 1, base + 2);
++            mesh->SetFaceMaterial(face, m_Material);
++            ++face;
++            mesh->SetFaceVertexIndex(face, base + 0, base + 2, base + 3);
++            mesh->SetFaceMaterial(face, m_Material);
++            ++face;
++        }
++    }
++    mesh->SetLitMode(VX_PRELITMESH);
++    mesh->BuildNormals();
++
++    // 4. The entity that carries it into the scene.
++    m_Entity = (CK3dEntity *)context->CreateObject(CKCID_3DENTITY, "SteveAvatar");
++    if (!m_Entity) {
++        log_line("CreateObject(CKCID_3DENTITY) failed");
++        return false;
++    }
++    m_Entity->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    m_Entity->SetCurrentMesh(mesh);
++    m_Entity->Show((m_FirstPerson || m_Hide) ? CKHIDE : CKSHOW);
++    m_Entity->SetPickable(FALSE);
++    const VxVector scale(m_Scale, m_Scale, m_Scale);
++    m_Entity->SetScale(&scale);
++
++    CKLevel *level = context->GetCurrentLevel();
++    CKScene *scene = level ? level->GetCurrentScene() : nullptr;
++    if (scene) {
++        scene->AddObject(m_Entity);
++    } else {
++        log_line("no current scene; the avatar will not be drawn");
++        return false;
++    }
++
++    // 5. The ball. It does not exist yet at this point -- the level's own
++    // scripts create it a few frames later -- so FindBall() keeps looking.
++    FindBall(context, 0.0f);
++
++    if (m_FirstPerson || m_HasCamOffset) {
++        m_Camera = (CKCamera *)context->CreateObject(CKCID_CAMERA, "SteveCamera");
++        if (m_Camera) {
++            m_Camera->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++            m_Camera->SetFov(1.2217f); // 70 degrees, the Minecraft default
++            m_Camera->SetFrontPlane(0.5f);
++            m_Camera->SetBackPlane(20000.0f);
++            if (!m_YawGiven) m_Yaw = 0.0f;
++        }
++    }
++
++    if (m_Debug) {
++        int shown = 0;
++        const XObjectPointerArray all = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
++        for (CKObject **it = all.Begin(); it != all.End() && shown < 80; ++it) {
++            CK3dEntity *entity = (CK3dEntity *)*it;
++            if (!entity || entity == m_Entity) continue;
++            VxVector position(0.0f, 0.0f, 0.0f);
++            entity->GetPosition(&position);
++            log_line("  entity %-28s at (%.1f, %.1f, %.1f)",
++                     entity->GetName() ? entity->GetName() : "(unnamed)",
++                     position.x, position.y, position.z);
++            ++shown;
++        }
++    }
++    log_line("built: %d vertices, %d triangles, %.1f units tall, scale %.3f, first person %d",
++             vertexCount, faceCount, m_Height, m_Scale, m_FirstPerson ? 1 : 0);
++    return true;
++}
++
++void CMinecraftSteve::UpdatePlacement(CKContext *context, float deltaSeconds) {
++    if (!m_Entity) return;
++
++    VxVector target = m_FixedPosition;
++    if (m_FollowBall && m_Ball) {
++        VxVector ballPosition;
++        m_Ball->GetPosition(&ballPosition);
++        // The ball's centre sits one radius above the track; Steve's feet go on
++        // the track underneath it.
++        const VxBbox box = m_Ball->GetBoundingBox(FALSE);
++        const float radius = box.GetSize().y > 0.01f ? box.GetSize().y * 0.5f : 2.0f;
++        target = VxVector(ballPosition.x, ballPosition.y - radius, ballPosition.z);
++    }
++    m_Entity->SetPosition(&target);
++    if (m_HideBall && m_Ball) m_Ball->Show(CKHIDE);
++
++    float yaw = m_YawGiven ? m_FixedYaw : m_Yaw;
++    const VxVector direction(sinf(yaw), 0.0f, cosf(yaw));
++    const VxVector up(0.0f, 1.0f, 0.0f);
++    m_Entity->SetOrientation(&direction, &up);
++}
++
++// Third person, but attached to Steve instead of parked in the level, so the
++// shot keeps him in frame while the ball he stands on rolls away.
++void CMinecraftSteve::ApplyOffsetCamera(CKRenderContext *renderContext) {
++    if (!m_Camera || !m_Entity || !renderContext) return;
++
++    VxVector feet;
++    m_Entity->GetPosition(&feet);
++    const VxVector eye(feet.x + m_CamOffset.x, feet.y + m_CamOffset.y, feet.z + m_CamOffset.z);
++    const VxVector target(feet.x, feet.y + m_EyeHeight * 0.9f, feet.z);
++
++    m_Camera->SetPosition(&eye);
++    m_Camera->LookAt(&target);
++    renderContext->AttachViewpointToCamera(m_Camera);
++    renderContext->SetViewTransformationMatrix(m_Camera->GetInverseWorldMatrix());
++    VxMatrix projection;
++    const float aspect = (renderContext->GetHeight() > 0)
++                             ? (float)renderContext->GetWidth() / (float)renderContext->GetHeight()
++                             : 4.0f / 3.0f;
++    projection.Perspective(m_Camera->GetFov(), aspect, m_Camera->GetFrontPlane(),
++                           m_Camera->GetBackPlane());
++    renderContext->SetProjectionTransformationMatrix(projection);
++}
++
++void CMinecraftSteve::ApplyFirstPersonCamera(CKRenderContext *renderContext) {
++    if (!m_Camera || !m_Entity || !renderContext) return;
++
++    VxVector eye;
++    m_Entity->GetPosition(&eye);
++    eye.y += m_EyeHeight;
++
++    const VxVector forward(sinf(m_Yaw), 0.0f, cosf(m_Yaw));
++    const VxVector up(0.0f, 1.0f, 0.0f);
++
++    m_Camera->SetPosition(&eye);
++    m_Camera->SetOrientation(&forward, &up);
++
++    renderContext->AttachViewpointToCamera(m_Camera);
++    renderContext->SetViewTransformationMatrix(m_Camera->GetInverseWorldMatrix());
++    VxMatrix projection;
++    const float aspect = (renderContext->GetHeight() > 0)
++                             ? (float)renderContext->GetWidth() / (float)renderContext->GetHeight()
++                             : 4.0f / 3.0f;
++    projection.Perspective(m_Camera->GetFov(), aspect, m_Camera->GetFrontPlane(),
++                           m_Camera->GetBackPlane());
++    renderContext->SetProjectionTransformationMatrix(projection);
++}
++
++// The player ball is not in the level file: the level's own scripts build it a
++// few frames after the level starts, so a lookup at build time finds only the
++// static P_Ball_* pickups. This keeps looking every frame until it has one and
++// reports what it sees once a second under BALLANCE_MC_STEVE_DEBUG.
++void CMinecraftSteve::FindBall(CKContext *context, float deltaSeconds) {
++    if (!m_FollowBall) return;
++    m_BallScanTimer += deltaSeconds;
++    const bool report = m_Debug && m_BallScanTimer >= 1.0f;
++    if (report) m_BallScanTimer = 0.0f;
++
++    const XObjectPointerArray entities = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
++    for (CKObject **it = entities.Begin(); it != entities.End(); ++it) {
++        CK3dEntity *entity = (CK3dEntity *)*it;
++        if (!entity || entity == m_Entity) continue;
++        const char *name = entity->GetName();
++        if (!name) continue;
++        if (!name_is_ball(name)) continue;
++        VxVector position(0.0f, 0.0f, 0.0f);
++        entity->GetPosition(&position);
++        if (report)
++            log_line("runtime ball candidate \"%s\" at (%.2f, %.2f, %.2f)", name,
++                     position.x, position.y, position.z);
++        // The player ball is I_Ball_* ("I" = the interactive item the level
++        // hands to the player); Ball_Pos_Frame / Ball_*_piece are the ball's
++        // helper frames and debris and sit at the origin until the level runs.
++        const bool playerBall = !strncmp(name, "I_Ball", 6);
++        const bool better = !m_Ball || playerBall;
++        if (better) {
++            if (m_Ball != entity)
++                log_line("following \"%s\" (size %.2f x %.2f x %.2f)", name,
++                         entity->GetBoundingBox(FALSE).GetSize().x,
++                         entity->GetBoundingBox(FALSE).GetSize().y,
++                         entity->GetBoundingBox(FALSE).GetSize().z);
++            m_Ball = entity;
++            if (m_Debug) log_line("ball %s is %s", name, playerBall ? "the player" : "a placeholder");
++        }
++    }
++    if (report && !m_Ball) log_line("no runtime ball yet");
++}
++
++void CMinecraftSteve::DebugLog(CKContext *context, float deltaSeconds) {
++    if (!m_Debug || !m_DebugTimerReady) return;
++    m_LogTimer += deltaSeconds;
++    if (m_LogTimer < 1.0f) return;
++    m_LogTimer = 0.0f;
++    VxVector position(0.0f, 0.0f, 0.0f);
++    if (m_Entity) m_Entity->GetPosition(&position);
++    log_line("at (%.1f, %.1f, %.1f) yaw %.1f", position.x, position.y, position.z, m_Yaw);
++
++    // The player ball is whatever moves. Everything in the level file is welded
++    // in place, so a second-by-second diff of every 3D entity names it without
++    // having to guess at script-created object names.
++    const XObjectPointerArray all = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
++    for (CKObject **it = all.Begin(); it != all.End(); ++it) {
++        CK3dEntity *entity = (CK3dEntity *)*it;
++        if (!entity || entity == m_Entity || entity == m_Camera) continue;
++        VxVector now(0.0f, 0.0f, 0.0f);
++        entity->GetPosition(&now);
++        auto found = m_LastPositions.find(entity);
++        if (found == m_LastPositions.end()) {
++            m_LastPositions[entity] = now;
++            continue;
++        }
++        const VxVector &before = found->second;
++        if ((now - before).Magnitude() > 0.05f)
++            log_line("moved \"%s\": (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f)",
++                     entity->GetName() ? entity->GetName() : "(unnamed)",
++                     before.x, before.y, before.z, now.x, now.y, now.z);
++        found->second = now;
++    }
++}
++
++void CMinecraftSteve::Frame(CKContext *context, CKRenderContext *renderContext,
++                            float deltaSeconds) {
++    if (!m_Enabled && !ReadEnvironment()) return;
++    if (m_BuildFailed) return;
++    if (!m_Built) {
++        if (!Build(context)) {
++            m_BuildFailed = true;
++            log_line("disabled after a build failure");
++            return;
++        }
++        m_Built = true;
++        m_DebugTimerReady = true;
++    }
++    FindBall(context, deltaSeconds);
++    UpdatePlacement(context, deltaSeconds);
++    if (m_FirstPerson) ApplyFirstPersonCamera(renderContext);
++    else if (m_HasCamOffset) ApplyOffsetCamera(renderContext);
++    DebugLog(context, deltaSeconds);
++}
++
++void CMinecraftSteve::Shutdown(CKContext *context) {
++    if (!context) return;
++    if (m_Entity) {
++        CKScene *scene = nullptr;
++        CKLevel *level = context->GetCurrentLevel();
++        if (level) scene = level->GetCurrentScene();
++        if (scene) scene->RemoveObject(m_Entity);
++        context->DestroyObject(m_Entity);
++        m_Entity = nullptr;
++    }
++    if (m_Camera) {
++        context->DestroyObject(m_Camera);
++        m_Camera = nullptr;
++    }
++    if (m_Mesh) {
++        context->DestroyObject(m_Mesh);
++        m_Mesh = nullptr;
++    }
++    if (m_Material) {
++        context->DestroyObject(m_Material);
++        m_Material = nullptr;
++    }
++    if (m_Texture) {
++        context->DestroyObject(m_Texture);
++        m_Texture = nullptr;
++    }
++    m_Built = false;
++}
+diff --git a/src/MinecraftSteve.h b/src/MinecraftSteve.h
+new file mode 100644
+index 0000000..8981204
+--- /dev/null
++++ b/src/MinecraftSteve.h
+@@ -0,0 +1,86 @@
++#ifndef PLAYER_MINECRAFTSTEVE_H
++#define PLAYER_MINECRAFTSTEVE_H
++
++#include "CKAll.h"
++
++#include <map>
++
++// Puts Minecraft's Steve *inside* the Ballance world.
++//
++// The 2026-11-05 verdict was that the M0/M0b compositing pipeline had the
++// direction backwards: it painted a whole Minecraft frame over the Ballance
++// scene, so the world on screen was Minecraft's. What was wanted is the other
++// way round -- the Ballance world stays the world, and Steve stands in it.
++//
++// So this builds a plain CK2 mesh (six boxes on the classic 64x32 skin atlas),
++// gives it to a CK3dEntity, and drops that entity into the current scene. It is
++// therefore depth tested, lit and fogged by the game's own 3D pass: the pillars
++// occlude Steve exactly as they occlude the track. No shared memory, no
++// reprojection, no rasterizer hooks.
++//
++// Environment:
++//   BALLANCE_MC_STEVE=1        enable (default off)
++//   BALLANCE_MC_STEVE_POS=x,y,z  fixed feet position in Ballance units
++//   BALLANCE_MC_STEVE_BALL=0   do not follow the ball entity, stay at POS
++//   BALLANCE_MC_STEVE_YAW=deg  fixed yaw, overrides the ball heading
++//   BALLANCE_MC_STEVE_SCALE=f  Ballance units per model unit (default 1)
++//   BALLANCE_MC_STEVE_FP=1     park the camera at Steve's eyes
++//   BALLANCE_MC_STEVE_DEBUG=1  once a second, log what it found and where it is
++class CMinecraftSteve {
++public:
++    CMinecraftSteve();
++    ~CMinecraftSteve();
++
++    // Everything happens on the render thread, once per drawn frame.
++    void Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds);
++    void Shutdown(CKContext *context);
++
++    bool Enabled() const { return m_Enabled; }
++
++private:
++    bool ReadEnvironment();
++    bool Build(CKContext *context);
++    void UpdatePlacement(CKContext *context, float deltaSeconds);
++    void FindBall(CKContext *context, float deltaSeconds);
++    void ApplyFirstPersonCamera(CKRenderContext *renderContext);
++    void ApplyOffsetCamera(CKRenderContext *renderContext);
++    void DebugLog(CKContext *context, float deltaSeconds);
++
++    bool m_Enabled;
++    bool m_Built;
++    bool m_FirstPerson;
++    bool m_UseFixedPosition;
++    bool m_FollowBall;
++    bool m_Debug;
++    bool m_YawGiven;
++    bool m_LogPending;
++    bool m_DebugTimerReady;
++    bool m_BuildFailed;
++    bool m_Hide;
++    bool m_HideBall;
++    bool m_HasCamOffset;
++
++    VxVector m_CamOffset;
++
++    float m_Scale;
++    float m_FixedYaw;
++    VxVector m_FixedPosition;
++    float m_Yaw;
++    float m_LogTimer;
++    float m_BallScanTimer;
++    std::map<CK3dEntity *, VxVector> m_LastPositions;
++
++    CKMesh *m_Mesh;
++    CK3dEntity *m_Entity;
++    CK3dEntity *m_Ball;
++    CKCamera *m_Camera;
++    CKTexture *m_Texture;
++    CKMaterial *m_Material;
++
++    // Half extent of the model in Ballance units, used to place the feet and
++    // to report a height that can be compared against the ball.
++    float m_Height;
++    float m_EyeHeight;
++};
++
++#endif // PLAYER_MINECRAFTSTEVE_H
 diff --git a/src/Player.cpp b/src/Player.cpp
 index 19f1e16..67e4656 100644
 --- a/src/Player.cpp

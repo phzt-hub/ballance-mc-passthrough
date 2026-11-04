@@ -1,0 +1,35 @@
+{
+	"schemaVersion": 1,
+	"id": "xpconvert",
+	"version": "${version}",
+	"name": "XP Convert",
+	"description": "Right-click an enchanting table with a glass bottle to convert XP levels into bottles o' enchanting. The client half additionally exports every rendered frame into the Ballance frame mailbox (milestone M0b of the Ballance <-> Minecraft passthrough).",
+	"authors": [
+		"phzt"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/"
+	},
+	"license": "CC0-1.0",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.example.xpconvert.XpConvertMod"
+		],
+		"client": [
+			"com.example.xpconvert.client.XpConvertClient"
+		]
+	},
+	"mixins": [
+		{
+			"config": "xpconvert.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

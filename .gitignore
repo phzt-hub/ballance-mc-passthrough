@@ -4,6 +4,8 @@
 /build/
 *.png
 *.log
+# ...except the delivery screenshots
+!/docs/steve-shots/*.png
 
 # python 缓存
 __pycache__/
