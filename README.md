@@ -49,6 +49,7 @@ tools/build-nmo-geom.sh    建它（钉死编译参数）
 tools/export-levels.sh     13 关 + PH + 资产全量导出
 tools/calibrate.py         由导出产物生成 docs/scale-calibration.md
 tools/nmo_dump.cpp         早期的容器层探针（看不到 3D 类，仅存档）
+tools/passthrough/         画面穿透 M0b：协议、两半实现、验收与取材脚本（见该目录 README）
 external/fetch-upstream.sh 拉上游 Ballanced / CKRenderEngine（不随本仓库分发）
 ```
 
