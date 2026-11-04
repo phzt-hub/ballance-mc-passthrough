@@ -7,11 +7,15 @@
 #   ./run-poc1.sh extra-args-for-Player
 set -euo pipefail
 
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+
 BALLANCE_ROOT=${BALLANCE_ROOT:-$HOME/src/Ballanced}
 ASSETS=${ASSETS:-$HOME/src/ballance-game}
 STAGE=${STAGE:-$BALLANCE_ROOT/build/linux-x64-runtime/stage}
-GAME=${GAME:-/tmp/poc1/game}
-OUT=${OUT:-/tmp/poc1/out}
+# Runs live inside the repo (git-ignored) instead of /tmp: /tmp is tmpfs
+# here, so a reboot used to take the directory with it.
+GAME=${GAME:-$ROOT/run/game}
+OUT=${OUT:-$ROOT/run/out}
 FRAMES=${FRAMES-600,1200,1800}
 RUN_SECONDS=${RUN_SECONDS:-45}
 DISPLAY=${DISPLAY:-:99}

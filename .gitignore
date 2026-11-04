@@ -7,6 +7,9 @@
 # ...except the delivery screenshots
 !/docs/steve-shots/*.png
 
+# 运行目录（生成的游戏树 + 截图/日志，可随时重建）
+/run/
+
 # python 缓存
 __pycache__/
 tools/passthrough/shmfeed
