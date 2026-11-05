@@ -14,5 +14,14 @@ public final class PassthroughClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         McFrameExport.initialise();
+        // M1: the camera channel is opened lazily on the first frame, because the
+        // Ballance side creates the shared object when it starts publishing and
+        // either process may come up first.
+        if (!CameraSync.enabled()) {
+            LOGGER.info("camera sync disabled by BALLANCE_MC_CAMERA=0");
+        }
     }
+
+    private static final org.slf4j.Logger LOGGER =
+            org.slf4j.LoggerFactory.getLogger("ballance-passthrough-camera");
 }

@@ -1,12 +1,13 @@
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index e051c92..ba6d25b 100644
+index e051c92..ea0961b 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -39,6 +39,11 @@ endif ()
+@@ -39,6 +39,12 @@ endif ()
  set(PLAYER_HEADERS
          StaticPlugins.h
          GamePlayer.h
 +        MinecraftOverlay.h
++        MinecraftCameraSync.h
 +        MinecraftHud.h
 +        MinecraftSettings.h
 +        MinecraftFontAtlas.h
@@ -14,11 +15,12 @@ index e051c92..ba6d25b 100644
          GameConfig.h
          PlayerOptions.h
          PlayerSdlShortcuts.h
-@@ -52,6 +57,10 @@ set(PLAYER_HEADERS
+@@ -52,6 +58,11 @@ set(PLAYER_HEADERS
  set(PLAYER_SOURCES
          Player.cpp
          GamePlayer.cpp
 +        MinecraftOverlay.cpp
++        MinecraftCameraSync.cpp
 +        MinecraftHud.cpp
 +        MinecraftSettings.cpp
 +        MinecraftSteve.cpp
@@ -38,9 +40,15 @@ index 347ca16..4bc5d2e 100644
  
  #define GAMECONFIG_PATH_FIELDS \
 diff --git a/src/GamePlayer.cpp b/src/GamePlayer.cpp
-index 4ffa776..aabadba 100644
+index 4ffa776..8765f27 100644
 --- a/src/GamePlayer.cpp
 +++ b/src/GamePlayer.cpp
+@@ -1,4 +1,4 @@
+-﻿#include "GamePlayer.h"
++#include "GamePlayer.h"
+ #include "PlayerOptions.h"
+ 
+ #include <ctype.h>
 @@ -288,6 +288,18 @@ bool CGamePlayer::Init(const CGameConfig &runtimeConfig, const CGameConfig &pers
          SDL_RaiseWindow(m_SdlWindow);
      }
@@ -1039,7 +1047,7 @@ index 4ffa776..aabadba 100644
  void CGamePlayer::Run()
  {
      while (Update())
-@@ -469,8 +1453,60 @@ void CGamePlayer::Process()
+@@ -469,8 +1453,64 @@ void CGamePlayer::Process()
      m_CKContext->Process();
  }
  
@@ -1079,13 +1087,15 @@ index 4ffa776..aabadba 100644
 +    Poc1InputLog(m_CKContext, m_RenderContext);
 +    PocDumpScriptsAuto(m_CKContext);
 +    PocDump2DAuto(m_CKContext);
++    static Uint64 lastTicks = 0;
++    const Uint64 nowTicks = SDL_GetTicks();
++    const float elapsed = lastTicks ? (float)(nowTicks - lastTicks) / 1000.0f : 0.0f;
++    lastTicks = nowTicks;
++    // M1: hand the viewpoint this frame will be drawn from to the Minecraft
++    // client. It has to be current (the level scripts move the camera every
++    // frame), so it is sampled right before the draw, not after it.
++    m_CameraSync.Frame(m_CKContext, m_RenderContext, elapsed);
 +    {
-+        // Steve is placed through the normal scene graph, so it is drawn by
-+        // the game's own 3D pass and therefore depth tested against the track.
-+        static Uint64 lastTicks = 0;
-+        const Uint64 nowTicks = SDL_GetTicks();
-+        const float elapsed = lastTicks ? (float)(nowTicks - lastTicks) / 1000.0f : 0.0f;
-+        lastTicks = nowTicks;
 +        // The panel goes first: it owns the F1 key and the clicks, and whatever it
 +        // changes in the settings is picked up by Steve in the same frame.
 +        // The HUD goes first so its post-sprite callback is installed before the
@@ -1093,6 +1103,8 @@ index 4ffa776..aabadba 100644
 +        // backdrop has to land on top of the hotbar, not under it.
 +        m_MinecraftHud.Frame(m_CKContext, m_RenderContext, elapsed);
 +        m_MinecraftPanel.Frame(m_CKContext, m_RenderContext, elapsed);
++        // Steve is placed through the normal scene graph, so it is drawn by
++        // the game's own 3D pass and therefore depth tested against the track.
 +        m_Steve.SetPanelOpen(m_MinecraftPanel.IsOpen());
 +        m_Steve.Frame(m_CKContext, m_RenderContext, elapsed);
 +        ApplyRelativeMouseMode(m_SdlWindow, m_Steve.WantsRelativeMouse());
@@ -1100,10 +1112,11 @@ index 4ffa776..aabadba 100644
      m_RenderContext->Render();
  }
  
-@@ -485,6 +1521,10 @@ void CGamePlayer::Shutdown()
+@@ -485,6 +1525,11 @@ void CGamePlayer::Shutdown()
          m_GameInfo = NULL;
      }
  
++    m_CameraSync.Shutdown();
 +    m_MinecraftPanel.Shutdown(m_CKContext);
 +    m_MinecraftHud.Shutdown(m_CKContext);
 +    m_Steve.Shutdown(m_CKContext);
@@ -1111,7 +1124,7 @@ index 4ffa776..aabadba 100644
      ShutdownEngine();
      ShutdownWindow();
  
-@@ -1542,6 +2582,7 @@ void CGamePlayer::OnActivateApp(bool active)
+@@ -1542,6 +2587,7 @@ void CGamePlayer::OnActivateApp(bool active)
                  m_InputManager->Pause(TRUE);
  
              ReleaseCursorClip();
@@ -1120,13 +1133,18 @@ index 4ffa776..aabadba 100644
              if (IsRenderFullscreen())
              {
 diff --git a/src/GamePlayer.h b/src/GamePlayer.h
-index 3b54c38..156e377 100644
+index 3b54c38..3e5bf73 100644
 --- a/src/GamePlayer.h
 +++ b/src/GamePlayer.h
-@@ -4,6 +4,10 @@
+@@ -1,9 +1,14 @@
+-﻿#ifndef PLAYER_GAMEPLAYER_H
++#ifndef PLAYER_GAMEPLAYER_H
+ #define PLAYER_GAMEPLAYER_H
+ 
  #include "CKAll.h"
  
  #include "GameConfig.h"
++#include "MinecraftCameraSync.h"
 +#include "MinecraftHud.h"
 +#include "MinecraftOverlay.h"
 +#include "MinecraftSettings.h"
@@ -1134,7 +1152,7 @@ index 3b54c38..156e377 100644
  
  struct SDL_Window;
  
-@@ -19,6 +23,7 @@ public:
+@@ -19,6 +24,7 @@ public:
  
      bool Init(const CGameConfig &config);
      bool Init(const CGameConfig &runtimeConfig, const CGameConfig &persistentConfig);
@@ -1142,13 +1160,14 @@ index 3b54c38..156e377 100644
      bool Load(const char *filename = NULL);
  
      void Run();
-@@ -135,6 +140,20 @@ private:
+@@ -135,6 +141,21 @@ private:
      bool m_AltF4ShortcutDown;
      CGameConfig m_Config;
      CGameConfig m_PersistentConfig;
 +
 +    // Steve in the Ballance world (see MinecraftSteve.h). Off unless
 +    // BALLANCE_MC_STEVE is set.
++    CMinecraftCameraSync m_CameraSync;
 +    CMinecraftSteve m_Steve;
 +
 +    // Steve's user-facing options (Minecraft.ini) and the panel that edits them.
@@ -1163,6 +1182,539 @@ index 3b54c38..156e377 100644
  };
  
  #endif /* PLAYER_GAMEPLAYER_H */
+diff --git a/src/MinecraftCameraSync.cpp b/src/MinecraftCameraSync.cpp
+new file mode 100644
+index 0000000..88d3fc1
+--- /dev/null
++++ b/src/MinecraftCameraSync.cpp
+@@ -0,0 +1,455 @@
++#include "MinecraftCameraSync.h"
++
++#include <cerrno>
++#include <chrono>
++#include <cmath>
++#include <cstdarg>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#else
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
++
++namespace {
++
++constexpr float kRadiansToDegrees = 57.29577951308232f;
++constexpr float kLogIntervalSeconds = 5.0f;
++
++bool env_flag(const char *name)
++{
++    const char *value = getenv(name);
++    if (!value || !*value) return false;
++    return strcmp(value, "0") != 0 && strcmp(value, "off") != 0 && strcmp(value, "no") != 0;
++}
++
++void log_line(const char *fmt, ...)
++{
++    char buffer[512];
++    va_list args;
++    va_start(args, fmt);
++    vsnprintf(buffer, sizeof(buffer), fmt, args);
++    va_end(args);
++    fprintf(stderr, "[mc-camera] %s\n", buffer);
++    fflush(stderr);
++}
++
++// Same rules as CMinecraftSteve::FindBall: the level's own pickups start with
++// "P_" and never move, "Balloon" merely starts with "ball", and only the
++// interactive ball ("I_Ball...") is the one the player rolls.
++bool name_is_ball(const char *name)
++{
++    if (!name) return false;
++    if (name[0] == 'P' && name[1] == '_') return false;
++    for (const char *p = name; *p; ++p) {
++        if ((p[0] == 'b' || p[0] == 'B') && (p[1] == 'a' || p[1] == 'A') &&
++            (p[2] == 'l' || p[2] == 'L') && (p[3] == 'l' || p[3] == 'L')) {
++            return !(p[4] == 'o' || p[4] == 'O');
++        }
++    }
++    return false;
++}
++
++float normalize(VxVector &v)
++{
++    const float length = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
++    if (length > 1e-6f) {
++        v.x /= length;
++        v.y /= length;
++        v.z /= length;
++    }
++    return length;
++}
++
++} // namespace
++
++CMinecraftCameraSync::CMinecraftCameraSync()
++{
++    m_Enabled = env_flag("BALLANCE_MC_CAMERA");
++}
++
++CMinecraftCameraSync::~CMinecraftCameraSync()
++{
++    Shutdown();
++}
++
++void CMinecraftCameraSync::Shutdown()
++{
++    Release();
++}
++
++void CMinecraftCameraSync::ResolvePath()
++{
++    const char *path = getenv("BALLANCE_MC_CAMERA_PATH");
++    if (path && *path) {
++        snprintf(m_Path, sizeof(m_Path), "%s", path);
++        m_ShmName[0] = '\0';
++        return;
++    }
++
++    const char *name = getenv("BALLANCE_MC_CAMERA_SHM");
++    if (!name || !*name) name = "ballance_mc_camera";
++
++#if defined(_WIN32)
++    const char *local = getenv("LOCALAPPDATA");
++    if (!local || !*local) local = ".";
++    char directory[512];
++    snprintf(directory, sizeof(directory), "%s\\BallanceMcPassthrough", local);
++    CreateDirectoryA(directory, nullptr);
++    snprintf(m_Path, sizeof(m_Path), "%s\\%s.dat", directory, name);
++    m_ShmName[0] = '\0';
++#else
++    // shm_open takes an object name, not a path; /dev/shm/<name> is only the
++    // filesystem view of it (the same split the frame mailbox documents).
++    if (name[0] == '/')
++        snprintf(m_ShmName, sizeof(m_ShmName), "%s", name);
++    else
++        snprintf(m_ShmName, sizeof(m_ShmName), "/%s", name);
++    snprintf(m_Path, sizeof(m_Path), "/dev/shm/%s", name);
++#endif
++}
++
++bool CMinecraftCameraSync::Initialise()
++{
++    m_Initialised = true;
++    if (!m_Enabled) return false;
++
++    ResolvePath();
++
++#if defined(_WIN32)
++    HANDLE file = CreateFileA(m_Path, GENERIC_READ | GENERIC_WRITE,
++                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
++                              FILE_ATTRIBUTE_NORMAL, nullptr);
++    if (file == INVALID_HANDLE_VALUE) {
++        log_line("cannot open %s (error %lu)", m_Path, GetLastError());
++        return false;
++    }
++    LARGE_INTEGER size;
++    size.QuadPart = MPC_BYTES;
++    if (!SetFilePointerEx(file, size, nullptr, FILE_BEGIN) || !SetEndOfFile(file)) {
++        log_line("cannot size %s (error %lu)", m_Path, GetLastError());
++        CloseHandle(file);
++        return false;
++    }
++    HANDLE section = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0, MPC_BYTES, nullptr);
++    if (!section) {
++        log_line("CreateFileMapping %s failed (error %lu)", m_Path, GetLastError());
++        CloseHandle(file);
++        return false;
++    }
++    void *base = MapViewOfFile(section, FILE_MAP_ALL_ACCESS, 0, 0, MPC_BYTES);
++    if (!base) {
++        log_line("MapViewOfFile %s failed (error %lu)", m_Path, GetLastError());
++        CloseHandle(section);
++        CloseHandle(file);
++        return false;
++    }
++    m_FileHandle = file;
++    m_Section = section;
++    m_Header = (MpCameraHeader *)base;
++#else
++    m_Fd = shm_open(m_ShmName, O_CREAT | O_RDWR, 0666);
++    if (m_Fd < 0) {
++        log_line("shm_open %s failed: %s", m_ShmName, strerror(errno));
++        return false;
++    }
++    struct stat info;
++    if (fstat(m_Fd, &info) != 0 || (size_t)info.st_size < MPC_BYTES) {
++        if (ftruncate(m_Fd, (off_t)MPC_BYTES) != 0) {
++            log_line("ftruncate %s failed: %s", m_Path, strerror(errno));
++            close(m_Fd);
++            m_Fd = -1;
++            return false;
++        }
++    }
++    void *base = mmap(nullptr, MPC_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, m_Fd, 0);
++    if (base == MAP_FAILED) {
++        log_line("mmap %s failed: %s", m_Path, strerror(errno));
++        close(m_Fd);
++        m_Fd = -1;
++        return false;
++    }
++    m_Header = (MpCameraHeader *)base;
++#endif
++
++    m_Header->Magic = MPC_MAGIC;
++    m_Header->Version = MPC_VERSION;
++    m_Seq = 0;
++    m_Mapped = true;
++    log_line("publishing to %s (%u bytes)", m_Path, (unsigned)MPC_BYTES);
++    return true;
++}
++
++void CMinecraftCameraSync::Release()
++{
++    if (!m_Mapped || !m_Header) {
++        m_Header = nullptr;
++        return;
++    }
++    m_Header->Flags = 0;
++#if defined(_WIN32)
++    _InterlockedExchange((volatile long *)&m_Header->Seq, 0);
++#else
++    __atomic_store_n(&m_Header->Seq, 0u, __ATOMIC_RELEASE);
++#endif
++#if defined(_WIN32)
++    UnmapViewOfFile(m_Header);
++    if (m_Section) CloseHandle((HANDLE)m_Section);
++    if (m_FileHandle && m_FileHandle != INVALID_HANDLE_VALUE) CloseHandle((HANDLE)m_FileHandle);
++    m_Section = nullptr;
++    m_FileHandle = nullptr;
++#else
++    munmap(m_Header, MPC_BYTES);
++    if (m_Fd >= 0) close(m_Fd);
++    m_Fd = -1;
++#endif
++    m_Header = nullptr;
++    m_Mapped = false;
++}
++
++bool CMinecraftCameraSync::BallAlive(CKContext *context)
++{
++    if (!context || !m_Ball || !m_BallId) return false;
++    return context->GetObject(m_BallId) == m_Ball;
++}
++
++void CMinecraftCameraSync::FindBall(CKContext *context)
++{
++    if (m_Ball && BallAlive(context)) return;
++    m_Ball = nullptr;
++    m_BallId = 0;
++    if (!context) return;
++
++    const XObjectPointerArray entities = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
++    // More than one object looks like a ball, and which one is the player's
++    // depends on how the level was entered: the isolated harness (--level plus
++    // the start-up scripts) exposes the interactive I_Ball_*, while the real
++    // menu -> level flow exposes the rendered model (Ball_Wood / Ball_Stone /
++    // Ball_Paper) and leaves the other two parked at the origin. Rank them
++    // instead of hard-coding one name:
++    //   * I_Ball_* is the interactive ball and always wins;
++    //   * an exact Ball_Wood/Stone/Paper with a 4 x 4 x 4 box is the visible model;
++    //   * among those, the one the camera is actually looking at wins, which is
++    //     what separates the ball from the decorative pickups parked at (0,0,0).
++    CK3dEntity *best = nullptr;
++    float bestScore = -1e30f;
++    for (CKObject **it = entities.Begin(); it != entities.End(); ++it) {
++        CK3dEntity *entity = (CK3dEntity *)*it;
++        if (!entity) continue;
++        const char *name = entity->GetName();
++        if (!name || !name_is_ball(name)) continue;
++        const VxBbox box = entity->GetBoundingBox(FALSE);
++        if (!box.IsValid()) continue;
++        const VxVector size = box.GetSize();
++        if (fabsf(size.x - 4.0f) > 1.0f || fabsf(size.z - 4.0f) > 1.0f) continue;
++
++        VxVector position(0.0f, 0.0f, 0.0f);
++        entity->GetPosition(&position);
++
++        float score = 0.0f;
++        if (strncmp(name, "I_Ball", 6) == 0) score += 1000.0f;
++        if (strcmp(name, "Ball_Wood") == 0 || strcmp(name, "Ball_Stone") == 0 ||
++            strcmp(name, "Ball_Paper") == 0)
++            score += 300.0f;
++        if (entity->IsVisible()) score += 50.0f;
++        if (fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 40.0f) score += 20.0f;
++        const VxVector delta = position - m_Eye;
++        const float along = delta.x * m_Forward.x + delta.y * m_Forward.y + delta.z * m_Forward.z;
++        if (along > 0.0f) {
++            const float dx = delta.x - m_Forward.x * along;
++            const float dy = delta.y - m_Forward.y * along;
++            const float dz = delta.z - m_Forward.z * along;
++            score -= 0.5f * sqrtf(dx * dx + dy * dy + dz * dz);
++        } else {
++            score -= 200.0f;
++        }
++        if (score > bestScore) {
++            bestScore = score;
++            best = entity;
++        }
++    }
++
++    if (!best) return;
++    m_Ball = best;
++    m_BallId = best->GetID();
++    log_line("following ball \"%s\" (score %.0f)", best->GetName(), bestScore);
++}
++
++void CMinecraftCameraSync::Publish(const MpCameraHeader &header)
++{
++    if (!m_Header) return;
++    const uint32_t seq = ++m_Seq;
++    m_Header->Magic = header.Magic;
++    m_Header->Version = header.Version;
++    m_Header->Flags = header.Flags;
++    m_Header->Width = header.Width;
++    m_Header->Height = header.Height;
++    memcpy(m_Header->Eye, header.Eye, sizeof(header.Eye));
++    memcpy(m_Header->Forward, header.Forward, sizeof(header.Forward));
++    memcpy(m_Header->Up, header.Up, sizeof(header.Up));
++    m_Header->FovY = header.FovY;
++    m_Header->Aspect = header.Aspect;
++    m_Header->Near = header.Near;
++    m_Header->Far = header.Far;
++    memcpy(m_Header->Ball, header.Ball, sizeof(header.Ball));
++    m_Header->UnitsPerBlock = header.UnitsPerBlock;
++    m_Header->Frame = header.Frame;
++    m_Header->TimeNs = header.TimeNs;
++    // The sequence store is the publication barrier: everything above has to be
++    // visible to a reader that acquires this value (see MpCamera.h).
++#if defined(_WIN32)
++    _InterlockedExchange((volatile long *)&m_Header->Seq, (long)seq);
++#else
++    __atomic_store_n(&m_Header->Seq, seq, __ATOMIC_RELEASE);
++#endif
++}
++
++void CMinecraftCameraSync::Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds)
++{
++    if (!m_Initialised) {
++        if (!Initialise()) return;
++    }
++    if (!m_Enabled || !m_Mapped || !m_Header) return;
++    if (!context || !renderContext) return;
++
++    ++m_Frame;
++
++    MpCameraHeader header = {};
++    header.Magic = MPC_MAGIC;
++    header.Version = MPC_VERSION;
++    header.Width = (uint32_t)renderContext->GetWidth();
++    header.Height = (uint32_t)renderContext->GetHeight();
++    header.UnitsPerBlock = 4.0f; // docs/scale-calibration.md
++    header.Frame = m_Frame;
++
++    // The attached camera is what the scene draws from, and its transform is
++    // current: level scripts move it before the frame is rendered.
++    CKCamera *camera = renderContext->GetAttachedCamera();
++    VxMatrix world;
++    bool haveWorld = false;
++    if (camera) {
++        world = camera->GetWorldMatrix();
++        haveWorld = true;
++        header.FovY = camera->GetFov();
++        header.Near = camera->GetFrontPlane();
++        header.Far = camera->GetBackPlane();
++    } else {
++        const VxMatrix &view = renderContext->GetViewTransformationMatrix();
++        Vx3DInverseMatrix(world, view);
++        haveWorld = true;
++        const VxMatrix &projection = renderContext->GetProjectionTransformationMatrix();
++        const float m11 = projection[1][1];
++        const float m00 = projection[0][0];
++        header.FovY = (m11 > 1e-6f) ? 2.0f * atanf(1.0f / m11) : 1.2217f;
++        header.Near = 0.5f;
++        header.Far = 20000.0f;
++        (void)m00;
++    }
++
++    if (haveWorld) {
++        VxVector eye(world[3][0], world[3][1], world[3][2]);
++        VxVector forward(world[2][0], world[2][1], world[2][2]);
++        VxVector up(world[1][0], world[1][1], world[1][2]);
++        normalize(forward);
++        normalize(up);
++        m_Eye = eye;
++        m_Forward = forward;
++        header.Eye[0] = eye.x;
++        header.Eye[1] = eye.y;
++        header.Eye[2] = eye.z;
++        header.Forward[0] = forward.x;
++        header.Forward[1] = forward.y;
++        header.Forward[2] = forward.z;
++        header.Up[0] = up.x;
++        header.Up[1] = up.y;
++        header.Up[2] = up.z;
++        header.Flags |= MPC_FLAG_VALID;
++    }
++
++    header.Aspect = (header.Height > 0)
++                        ? (float)header.Width / (float)header.Height
++                        : (header.FovY > 0.0f ? 4.0f / 3.0f : 1.0f);
++
++    FindBall(context);
++    if (m_Ball && BallAlive(context)) {
++        VxVector ball(0.0f, 0.0f, 0.0f);
++        m_Ball->GetPosition(&ball);
++        header.Ball[0] = ball.x;
++        header.Ball[1] = ball.y;
++        header.Ball[2] = ball.z;
++        header.Flags |= MPC_FLAG_BALL;
++    }
++
++    header.TimeNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
++                        std::chrono::steady_clock::now().time_since_epoch())
++                        .count();
++
++    Publish(header);
++    ++m_Publishes;
++
++    // Diagnostic: which cameras exist, where they are, and which one the engine
++    // is drawing from. The gameplay camera is scripted, so its name is not
++    // something the code can assume -- this is how it gets identified.
++    if (env_flag("BALLANCE_MC_CAMERA_LIST") && (m_Frame % 120) == 1) {
++        const CKCamera *attached = renderContext->GetAttachedCamera();
++        const XObjectPointerArray cameras = context->GetObjectListByType(CKCID_CAMERA, TRUE);
++        log_line("%d camera object(s), ball=(%.1f %.1f %.1f)", (int)cameras.Size(),
++                 header.Ball[0], header.Ball[1], header.Ball[2]);
++        const XObjectPointerArray all = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
++        int ballLike = 0;
++        for (CKObject **it = all.Begin(); it != all.End(); ++it) {
++            CK3dEntity *each = (CK3dEntity *)*it;
++            if (!each || !name_is_ball(each->GetName())) continue;
++            const VxBbox box = each->GetBoundingBox(FALSE);
++            VxVector pos(0.0f, 0.0f, 0.0f);
++            each->GetPosition(&pos);
++            ++ballLike;
++            log_line("  ball-like \"%s\" pos=(%.1f %.1f %.1f) size=(%.1f %.1f %.1f) vis=%d%s",
++                     each->GetName(), pos.x, pos.y, pos.z,
++                     box.GetSize().x, box.GetSize().y, box.GetSize().z,
++                     each->IsVisible() ? 1 : 0,
++                     each == m_Ball ? "  <== tracked" : "");
++        }
++        if (!ballLike) log_line("  no ball-like 3d entity in the list");
++        for (CKObject **it = cameras.Begin(); it != cameras.End(); ++it) {
++            CKCamera *each = (CKCamera *)*it;
++            if (!each) continue;
++            VxVector pos(0.0f, 0.0f, 0.0f);
++            each->GetPosition(&pos);
++            VxVector dir(0.0f, 0.0f, 1.0f);
++            VxVector up(0.0f, 1.0f, 0.0f);
++            each->GetOrientation(&dir, &up);
++            log_line("  camera \"%s\" pos=(%.1f %.1f %.1f) dir=(%+.2f %+.2f %+.2f) fov=%.1f%s",
++                     each->GetName() ? each->GetName() : "(unnamed)",
++                     pos.x, pos.y, pos.z, dir.x, dir.y, dir.z,
++                     each->GetFov() * kRadiansToDegrees,
++                     each == attached ? "  <== attached" : "");
++        }
++    }
++
++    m_LogTimer += deltaSeconds;
++    if (m_LogTimer < 0.0f) m_LogTimer = 0.0f;
++    if (m_Publishes == 1 || m_LogTimer >= kLogIntervalSeconds) {
++        m_LogTimer = 0.0f;
++        log_line("camera=%s eye=(%.1f %.1f %.1f) dir=(%+.2f %+.2f %+.2f) fov=%.1f deg %ux%u ball=(%.1f %.1f %.1f) frames=%llu%s",
++                 (camera && camera->GetName()) ? camera->GetName() : "(none)",
++                 header.Eye[0], header.Eye[1], header.Eye[2],
++                 header.Forward[0], header.Forward[1], header.Forward[2],
++                 header.FovY * kRadiansToDegrees, header.Width, header.Height,
++                 header.Ball[0], header.Ball[1], header.Ball[2],
++                 (unsigned long long)m_Publishes,
++                 (header.Flags & MPC_FLAG_BALL) ? "" : " (no ball)");
++    }
++}
+diff --git a/src/MinecraftCameraSync.h b/src/MinecraftCameraSync.h
+new file mode 100644
+index 0000000..865ecdb
+--- /dev/null
++++ b/src/MinecraftCameraSync.h
+@@ -0,0 +1,66 @@
++#ifndef PLAYER_MINECRAFTCAMERASYNC_H
++#define PLAYER_MINECRAFTCAMERASYNC_H
++
++#include "CKAll.h"
++
++#include "MpCamera.h"
++
++// Publishes the viewpoint the frame is about to be rendered from, plus the player
++// ball position, into the camera channel described by MpCamera.h (milestone M1 of
++// the Ballance <-> Minecraft passthrough).
++//
++// This is the reverse direction of the frame mailbox: pixels travel Minecraft ->
++// Ballance, the viewpoint travels Ballance -> Minecraft. The Minecraft client uses
++// it to place its own camera, so after the passthrough is switched on the two
++// images are views of the same place, not two unrelated pictures.
++//
++// Off unless BALLANCE_MC_CAMERA=1; the mapping is created on first use and never
++// blocks the render thread. Nothing here is on the frame's critical path when the
++// feature is off: the cost is one environment lookup at construction.
++class CMinecraftCameraSync
++{
++public:
++    CMinecraftCameraSync();
++    ~CMinecraftCameraSync();
++
++    // Called once per rendered frame, before CGamePlayer::Render() draws.
++    void Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds);
++    void Shutdown();
++
++private:
++    bool Initialise();
++    void Release();
++    void ResolvePath();
++    void FindBall(CKContext *context);
++    bool BallAlive(CKContext *context);
++    void Publish(const MpCameraHeader &header);
++
++    bool m_Enabled = false;
++    bool m_Initialised = false;
++    bool m_Mapped = false;
++    bool m_ReportedError = false;
++
++    // POSIX: descriptor of the shm object; Windows: file handle and section.
++    int m_Fd = -1;
++    void *m_FileHandle = nullptr;
++    void *m_Section = nullptr;
++    MpCameraHeader *m_Header = nullptr;
++
++    char m_Path[512] = {};
++    char m_ShmName[128] = {};
++
++    uint32_t m_Seq = 0;
++    uint32_t m_Frame = 0;
++
++    CK_ID m_BallId = 0;
++    CK3dEntity *m_Ball = nullptr;
++    // Viewpoint of the frame being published; FindBall needs it to tell the
++    // player ball apart from the pickups parked at the origin.
++    VxVector m_Eye = VxVector(0.0f, 0.0f, 0.0f);
++    VxVector m_Forward = VxVector(0.0f, 0.0f, 1.0f);
++
++    float m_LogTimer = -1.0f;
++    uint64_t m_Publishes = 0;
++};
++
++#endif // PLAYER_MINECRAFTCAMERASYNC_H
 diff --git a/src/MinecraftFontAtlas.h b/src/MinecraftFontAtlas.h
 new file mode 100644
 index 0000000..ab08c82
@@ -5066,6 +5618,79 @@ index 0000000..a9c5a67
 +};
 +
 +#endif // PLAYER_MINECRAFTSTEVE_H
+diff --git a/src/MpCamera.h b/src/MpCamera.h
+new file mode 100644
+index 0000000..e44413c
+--- /dev/null
++++ b/src/MpCamera.h
+@@ -0,0 +1,67 @@
++#ifndef MPCAMERA_H
++#define MPCAMERA_H
++
++// Ballance -> Minecraft camera channel (milestone M1).
++//
++// The frame mailbox (mpframe.h, in tools/passthrough of ballance-mc-passthrough)
++// carries pixels one way, Minecraft -> Ballance. M1 needs the opposite direction:
++// the viewpoint the scene was just rendered from, plus where the player ball is,
++// so the Minecraft client can render its own world from that same viewpoint.
++//
++//   [ MpCameraHeader 4096 B ]      (no slots; the payload is scalar)
++//
++// The writer is this directory's MinecraftCameraSync.cpp, the reader is the Fabric
++// mod. Linux: POSIX shm object /dev/shm/<name>. Windows: memory-mapped file in
++// %LOCALAPPDATA%\\BallanceMcPassthrough\\<name>.dat -- the same transport split,
++// and the same reasons, as the frame mailbox.
++//
++// Ordering: seqlock. The writer fills the fields and then bumps Seq with release
++// semantics; the reader samples Seq with acquire semantics before and after
++// copying and retries when it moved. A torn sample is never consumed, and the
++// writer never blocks the render thread it is publishing from.
++//
++// Coordinates are Ballance world units (Virtools, row vectors, left handed,
++// +Z forward, +Y up). Converting to Minecraft blocks is the reader's job;
++// UnitsPerBlock says how many units make one block (docs/scale-calibration.md:
++// 4.0, i.e. the ball is one block across).
++//
++// Keep in sync with tools/passthrough/mpcamera.h (the tools-side mirror) and with
++// McCameraChannel.java (the reader, which hardcodes these offsets).
++
++#include <stdint.h>
++
++#define MPC_MAGIC 0x3143504Du // 'M''P''C''1' little endian
++#define MPC_VERSION 1u
++#define MPC_BYTES 4096u
++
++// Flags
++#define MPC_FLAG_VALID 0x1u      // Eye/Forward/Up/FovY are meaningful
++#define MPC_FLAG_BALL 0x2u       // Ball is meaningful
++#define MPC_FLAG_PAUSED 0x4u     // the level is not advancing
++
++typedef struct MpCameraHeader {
++    uint32_t Magic;         // MPC_MAGIC
++    uint32_t Version;       // MPC_VERSION
++    uint32_t Seq;           // seqlock counter, release-published last
++    uint32_t Flags;         // MPC_FLAG_*
++    uint32_t Width;         // Ballance render target, pixels
++    uint32_t Height;        // ditto
++    float Eye[3];           // camera position, units
++    float Forward[3];       // unit view direction, units
++    float Up[3];            // unit up vector, units
++    float FovY;             // vertical field of view, radians
++    float Aspect;           // Width / Height of the projection used
++    float Near;             // front plane, units
++    float Far;              // back plane, units
++    float Ball[3];          // player ball centre, units
++    float UnitsPerBlock;    // 4.0 (docs/scale-calibration.md)
++    uint32_t Frame;         // Ballance frame counter
++    uint64_t TimeNs;        // CLOCK_MONOTONIC of the publish
++    uint32_t Reserved[30];  // keeps the struct well inside MPC_BYTES
++} MpCameraHeader;
++
++#if defined(__cplusplus)
++static_assert(sizeof(MpCameraHeader) <= MPC_BYTES, "MpCameraHeader must fit in MPC_BYTES");
++#endif
++
++#endif // MPCAMERA_H
 diff --git a/src/Player.cpp b/src/Player.cpp
 index 19f1e16..67e4656 100644
 --- a/src/Player.cpp

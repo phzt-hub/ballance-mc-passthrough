@@ -4,7 +4,9 @@
 	"package": "com.example.ballance.passthrough.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
-		"MinecraftFrameMixin"
+		"MinecraftFrameMixin",
+		"MinecraftTickMixin",
+		"CameraMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

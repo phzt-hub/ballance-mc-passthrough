@@ -112,10 +112,23 @@ cd ~/mcmod && ./gradlew25 build && DISPLAY=:99 ./gradlew25 runClient
 试玩顺序：先开 Minecraft（`D:\bmc-play\mc\launch.bat`，进世界或停在菜单都行），再双击
 `D:\bmc-play\run-ballance-mc.bat`（开穿透）或 `run-ballance-plain.bat`（关，对照）。
 
+## M1：相机通道
+
+反向的一半：Ballance 每帧把「这一帧是从哪个视点画的 + 球心在哪」写进第二个共享内存，
+MC 拿它摆自己的相机。开关 `BALLANCE_MC_CAMERA=1`，协议 `mpcamera.h`。
+
+```sh
+# 读一眼（不依赖任何一端）
+./tools/passthrough/inspect-camera.py --watch 3
+# 走真实入口进关卡（--level 拿不到游戏相机）
+./tools/passthrough/enter-level.sh
+```
+
 ## 已知限制
 
 * 源分辨率任意（实测 640x480、854x480），每帧整帧上传，1280x720 以上的成本还没量。
 * 只做铺满全屏的拉伸（854x480 → 640x480 会横向压扁），还没有等比/裁切选项。
-* M1（相机同步）、M2（深度重投影）未做。
+* M1（相机同步）：Ballance → MC 的反向通道已通（`inspect-camera.py` 可独立读，Java 读端实测解算正确），
+  MC 客户端里的应用待实拍；M2（深度重投影）未做。细节与坑见 [docs/m1-camera.md](../../docs/m1-camera.md)。
 * 传的是 MC 的**整帧**，含它自己的 HUD；Ballance 侧 `MinecraftHud` 手搓的准星/快捷栏/心与之重复，
   两个都开会叠出两套。已知未修（决策 C），收法见 `docs/mc-hud.md` 「归属」一节。

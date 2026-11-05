@@ -28,7 +28,7 @@
 | PoC-1 | 构出 runtime，在深度上挂一个"读取并落盘一帧"的探针 | 拿到真实关卡的深度 PNG |
 | PoC-2 | 动态 obstacle 加/删 + 球能撞上 | 球被自己加的盒子挡住 |
 | M0 | 共享内存链路 + 全屏贴图 | Ballance 窗口里看到 MC 画面 |
-| M1 | 相机 + 球位 = Steve 位 | 球滚，MC 世界跟着走不漂 |
+| M1 🔄 | 相机 + 球位 = Steve 位 | 球滚，MC 世界跟着走不漂 —— 数据通路已通（阀门见 [docs/m1-camera.md](docs/m1-camera.md)），客户端内应用待实拍 |
 | M2 | 深度合成（重投影） | 柱子能挡住 MC 的墙 |
 | M3a | 输入转发 | 摆方块、点 TNT、点苦力怕 |
 | M3b | 地面 raycast | Steve 站在球道上不穿模 |
@@ -36,6 +36,10 @@
 
 **离线侧已完成（2026-11-01）**：13 关 472,534 个三角全部可离线导出（`tools/nmo_geom`），
 尺度已标定（1 MC 方块 = 4.0 Ballance 单位 = 1 个球直径），见 [docs/scale-calibration.md](docs/scale-calibration.md)。
+
+**M1 进度（2026-11-05）**：Ballance 侧已在每帧发布「这一次是从哪个视点画的 + 球心在哪」，
+MC 侧读端实测解算正确（eye/朝向/FOV/球位），相机接管代码已写、未在真实客户端里看到画面。
+坑与数字全在 [docs/m1-camera.md](docs/m1-camera.md)。
 
 **已知问题（2026-11-05）**：穿透开着且 `Hud=1` 时，MC 帧自带的 HUD 与 Ballance 侧手搓的
 准星/快捷栏/心会**叠成两套**。没修 —— 决定是先不动、等 M1/M2 到位后由 MC 帧接管，

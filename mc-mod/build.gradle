@@ -20,6 +20,19 @@ loom {
 			sourceSet sourceSets.client
 		}
 	}
+
+	runs {
+		client {
+			// Automated runs need to land in a world without driving the title screen.
+			// Loom writes program arguments into an arg file, so gradle's --args does
+			// not reach the game (measured 2026-11-05: the arg file had -classpath
+			// only, and Minecraft logged "Completely ignored arguments").
+			//   BALLANCE_MC_QUICKPLAY=<level id> ./gradlew25 runClient
+			if (System.getenv("BALLANCE_MC_QUICKPLAY")) {
+				programArgs "--quickPlaySingleplayer", System.getenv("BALLANCE_MC_QUICKPLAY")
+			}
+		}
+	}
 }
 
 dependencies {
