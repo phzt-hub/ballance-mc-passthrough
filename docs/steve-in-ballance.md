@@ -45,6 +45,7 @@ M0/M0b 的方向是反的：那套把 Minecraft 整帧贴到 Ballance 窗口上�
 | `BALLANCE_MC_STEVE_MENU_TEST=<file>` | 测试钩子：文件里写 0/1，等价于游戏自己调 `ShowCursor(FALSE/TRUE)` |
 | `BALLANCE_MC_STEVE_BODY=0` | 身体不跟滚动方向，退回「身体 = 头的 yaw」 |
 | `BALLANCE_MC_STEVE_TURN=deg` | 身体最大转向速度，度/秒，默认 720 |
+| `BALLANCE_MC_STEVE_LEVEL=0/1` | 强制「菜单」/「关卡中」；默认按当前相机名判断（带 InGame 算关卡、带 Menu 算菜单）。截图脚本跑的是合并关卡、没有游戏相机，所以都显式写 1 |
 
 ## 复现
 
@@ -55,6 +56,7 @@ tools/steve/render-ball-shots.sh         # 两帧：球上第三人称 / 第一�
 tools/steve/look_shots.sh                # 鼠标视角：五遍同机位，逐像素比
 tools/steve/menu_shots.sh                # 菜单闸门：Esc 释放、方向键取回
 tools/steve/body_shots.sh                # 身体朝向：真按键让球滚，另有 BODY=0 回退
+tools/panel/panel-input-test.sh          # 设置面板：真指针点七下 + F1/Esc 开合，逐条回读日志与 ini
 ```
 
 Xvfb 需要在 `:99` 上跑（`Xvfb :99 -screen 0 1600x1000x24`）。
@@ -179,3 +181,54 @@ PASS
 - 第 6 项守回退路径：`BODY=0` 时身体每帧都等于头的 yaw（头是 0），球照样在走（22 条弦，方向跨度 180°）。
 
 符号在同一套约定里：相机/头的 forward 是 `(sin(yaw), 0, cos(yaw))`（`look_shots` 里 yaw -28.6° 实测 (-0.479, +0.000, +0.878) 正是这个式子），身体 `SetOrientation` 用同一个式子，而 `want = atan2(dx, dz)` 恰好满足 `(sin(want), cos(want)) = (dx, dz) / |(dx, dz)|`——所以身体正面朝运动方向，不是反的。
+
+## 从菜单进关卡 / 换关卡（2026-11-05 修）
+
+在这之前：菜单里点 Start、点第 1 关，**当场段错误**，关卡永远是 `Cam_MenuLevel`（用户报的「进 level1 卡关进不去」）。原因不是菜单点击——`pick2d` 一路记到 `M_Main_But_1` / `M_Start_But_01` / `M_Start_But_03`，点击一直有效——而是**关卡一载入就把 Steve 追的东西全删了**：
+
+- 菜单里跟着的「球」是 `I_Ball_Stone`，它是那张地图的一部分，不是玩家；
+- `SteveAvatar` 加在**菜单那一幕的 scene** 里，关卡载入后整个 scene 连同物体一起没了；
+- Steve 手里还攥着这两根指针，下一帧 `GetPosition()` 就是读已释放内存。
+
+修法是一个每帧的 `Validate()`（`MinecraftSteve.cpp`）：
+
+| 检查 | 处理 |
+|---|---|
+| `context->GetObject(m_BallId) != m_Ball` | 清空、重找（`m_HasLastBallPosition = false`） |
+| 同上，`m_Entity` | `Shutdown()` 后下一帧重建（mesh/material/texture 是 Steve 自己的，不随关卡走） |
+| 同上，`m_Camera` | 清空 |
+| 当前 scene 不等于建它时的 scene | `AddObject()` 重新挂进新关卡那一幕 |
+
+**只比指针不安全**：对象释放后指针还指着那块内存，先解引用就已经是崩溃本身。所以每个指针旁边存了 `CK_ID`，判据是 `context->GetObject(id) == ptr`——拿 id 去问上下文，永远不碰旧指针。
+
+### 顺手拆出来的两件事
+
+- **菜单里不再画 Steve**。`UpdateLevelState()` 按**当前相机名**判断：名字带 `InGame` 算关卡中，带 `Menu` 算菜单；没见过的名字算「关卡中」，免得别的关卡相机换了名字 Steve 就消失。菜单里隐藏模型、也不抓鼠标（第一人称最要紧：菜单抓了指针就点不动按钮）。
+- **`BALLANCE_MC_STEVE_LEVEL=0/1`** 覆盖这个判断。截图/验收脚本跑的是「合并关卡 + 无游戏相机」，必须写 1，否则一律被当成菜单。
+
+顺带把每秒刷屏的 `ball ... is the player` 改成只在换球时打一次。
+
+### 验收
+
+关卡内 A/B（同一个球位、Steve 开/关各截一帧后相减）：
+
+    differing pixels: 6261
+    bbox x[194..456] y[111..348]  size 263x238
+    shirt  614 px  mean row 235
+    skin   1467 px  mean row 227
+    pants   181 px  mean row 250
+
+皮肤在衬衫之上、裤子之下，数量级也对得上——画出来的确实是那个模型，不是别的东西。崩溃计数 0，日志里 `level state: menu` 与 `level state: in a level` 各一次，恰好对应两次点击。
+
+三套旧回归全过：`look_shots.sh` 10 项、`menu_shots.sh` 8 项、`body_shots.sh` 6 项。
+
+## 设置面板（F1，2026-11-05）
+
+八个开关不再只能靠环境变量：F1 呼出面板，点一下就地生效并写进 `Bin/Minecraft.ini`
+（与 `Player.ini` 并排，面板永远不碰引擎自己的 ini）。环境变量仍然优先于 ini，
+被压住的行在面板上标橙色 `[env]`——截图脚本因此行为不变。
+
+面板打开时把世界冻住的方式是 **时间缩放置 0**，不是 `CKContext::Pause()`：后者会让
+`CKContext::Process()` 整段跳过 `ExecuteManagersPreProcess()`，而 SDL 输入管理器正是
+一个 PreProcess 管理器——暂停的上下文连鼠标按键都进不来，面板能画但点不动、F1 也关不掉。
+细节、测试钩子和实测输出见 `docs/settings-panel.md`。

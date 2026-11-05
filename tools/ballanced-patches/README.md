@@ -41,6 +41,14 @@ re-attaches its own camera on every `LaunchScene`.
 Also carries the PoC frame-log scaffolding: `BALLANCE_POC_FRAMELOG`,
 `BALLANCE_POC_BBOX`, `BALLANCE_POC_ISOLATE`, `BALLANCE_POC_CAM`.
 
+Also carries the in-game settings panel: `MinecraftSettings.*` (the eight rows, the
+`Bin/Minecraft.ini` they are written to, and the environment override that wins over it),
+`MinecraftOverlay.*` (a self-drawn F1 overlay using the render context's post-sprite
+callback and the same 2D primitives as `BuildingBlocks/Interface/DrawingPrimitives.cpp`),
+and `MinecraftFontAtlas.h` (a baked ASCII atlas; `tools/panel/make-font-atlas.py` regenerates it).
+See `docs/settings-panel.md`, including why the panel freezes the world with a zero time
+scale rather than `CKContext::Pause()`.
+
 ### BuildingBlocks.patch
 `Poc2Obstacles.cpp/.h` -- the physics obstacle harness hooked into
 `CKIpionManager::PostProcess()` via `Poc2BeforeFrame()` / `Poc2AfterFrame()`, plus the
@@ -80,7 +88,7 @@ its own `base_commit`; the resulting tree is byte-identical to the dirty tree
 untracked and were excluded from that comparison.
 
 ```
-Player.patch          base e5073295  7 files  2270 lines
+Player.patch          base e5073295 12 files  3932 lines
 BuildingBlocks.patch  base 5b833b92  4 files  790 lines
 RenderEngine.patch    base 049c78b3  4 files  271 lines
 SdlInputManager.patch base 368d4143  2 files   74 lines

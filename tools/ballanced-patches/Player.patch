@@ -1,19 +1,24 @@
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index e051c92..d82722c 100644
+index e051c92..1cbf95c 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -39,6 +39,7 @@ endif ()
+@@ -39,6 +39,10 @@ endif ()
  set(PLAYER_HEADERS
          StaticPlugins.h
          GamePlayer.h
++        MinecraftOverlay.h
++        MinecraftSettings.h
++        MinecraftFontAtlas.h
 +        MinecraftSteve.h
          GameConfig.h
          PlayerOptions.h
          PlayerSdlShortcuts.h
-@@ -52,6 +53,7 @@ set(PLAYER_HEADERS
+@@ -52,6 +56,9 @@ set(PLAYER_HEADERS
  set(PLAYER_SOURCES
          Player.cpp
          GamePlayer.cpp
++        MinecraftOverlay.cpp
++        MinecraftSettings.cpp
 +        MinecraftSteve.cpp
          GameConfig.cpp
          PlayerOptions.cpp
@@ -31,10 +36,27 @@ index 347ca16..4bc5d2e 100644
  
  #define GAMECONFIG_PATH_FIELDS \
 diff --git a/src/GamePlayer.cpp b/src/GamePlayer.cpp
-index 4ffa776..0272d99 100644
+index 4ffa776..90849a0 100644
 --- a/src/GamePlayer.cpp
 +++ b/src/GamePlayer.cpp
-@@ -382,6 +382,978 @@ bool CGamePlayer::Load(const char *filename)
+@@ -288,6 +288,16 @@ bool CGamePlayer::Init(const CGameConfig &runtimeConfig, const CGameConfig &pers
+         SDL_RaiseWindow(m_SdlWindow);
+     }
+ 
++    // Steve's own settings sit beside Player.ini and are read once here, before
++    // the first frame: the avatar and the panel both read this one object after
++    // this point, so neither has to know where the file is.
++    m_MinecraftSettings.SetFromPlayerIni(m_PersistentConfig.GetPath(eConfigPath));
++    if (!m_MinecraftSettings.Load())
++        CLogger::Get().Error("Failed to load Minecraft settings: %s",
++                             m_MinecraftSettings.GetPath());
++    m_MinecraftPanel.SetSettings(&m_MinecraftSettings);
++    m_Steve.SetSettings(&m_MinecraftSettings);
++
+     m_State = eReady;
+     return true;
+ }
+@@ -382,6 +392,978 @@ bool CGamePlayer::Load(const char *filename)
      return FinishLoad(filename, resolvedFile.CStr());
  }
  
@@ -1013,7 +1035,7 @@ index 4ffa776..0272d99 100644
  void CGamePlayer::Run()
  {
      while (Update())
-@@ -469,8 +1441,52 @@ void CGamePlayer::Process()
+@@ -469,8 +1451,56 @@ void CGamePlayer::Process()
      m_CKContext->Process();
  }
  
@@ -1060,22 +1082,27 @@ index 4ffa776..0272d99 100644
 +        const Uint64 nowTicks = SDL_GetTicks();
 +        const float elapsed = lastTicks ? (float)(nowTicks - lastTicks) / 1000.0f : 0.0f;
 +        lastTicks = nowTicks;
++        // The panel goes first: it owns the F1 key and the clicks, and whatever it
++        // changes in the settings is picked up by Steve in the same frame.
++        m_MinecraftPanel.Frame(m_CKContext, m_RenderContext, elapsed);
++        m_Steve.SetPanelOpen(m_MinecraftPanel.IsOpen());
 +        m_Steve.Frame(m_CKContext, m_RenderContext, elapsed);
 +        ApplyRelativeMouseMode(m_SdlWindow, m_Steve.WantsRelativeMouse());
 +    }
      m_RenderContext->Render();
  }
  
-@@ -485,6 +1501,8 @@ void CGamePlayer::Shutdown()
+@@ -485,6 +1515,9 @@ void CGamePlayer::Shutdown()
          m_GameInfo = NULL;
      }
  
++    m_MinecraftPanel.Shutdown(m_CKContext);
 +    m_Steve.Shutdown(m_CKContext);
 +
      ShutdownEngine();
      ShutdownWindow();
  
-@@ -1542,6 +2560,7 @@ void CGamePlayer::OnActivateApp(bool active)
+@@ -1542,6 +2575,7 @@ void CGamePlayer::OnActivateApp(bool active)
                  m_InputManager->Pause(TRUE);
  
              ReleaseCursorClip();
@@ -1084,18 +1111,20 @@ index 4ffa776..0272d99 100644
              if (IsRenderFullscreen())
              {
 diff --git a/src/GamePlayer.h b/src/GamePlayer.h
-index 3b54c38..1543654 100644
+index 3b54c38..95c45f6 100644
 --- a/src/GamePlayer.h
 +++ b/src/GamePlayer.h
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,9 @@
  #include "CKAll.h"
  
  #include "GameConfig.h"
++#include "MinecraftOverlay.h"
++#include "MinecraftSettings.h"
 +#include "MinecraftSteve.h"
  
  struct SDL_Window;
  
-@@ -19,6 +20,7 @@ public:
+@@ -19,6 +22,7 @@ public:
  
      bool Init(const CGameConfig &config);
      bool Init(const CGameConfig &runtimeConfig, const CGameConfig &persistentConfig);
@@ -1103,7 +1132,7 @@ index 3b54c38..1543654 100644
      bool Load(const char *filename = NULL);
  
      void Run();
-@@ -135,6 +137,10 @@ private:
+@@ -135,6 +139,17 @@ private:
      bool m_AltF4ShortcutDown;
      CGameConfig m_Config;
      CGameConfig m_PersistentConfig;
@@ -1111,16 +1140,1439 @@ index 3b54c38..1543654 100644
 +    // Steve in the Ballance world (see MinecraftSteve.h). Off unless
 +    // BALLANCE_MC_STEVE is set.
 +    CMinecraftSteve m_Steve;
++
++    // Steve's user-facing options (Minecraft.ini) and the panel that edits them.
++    // The panel owns the pause while it is open and writes the file on every
++    // change; Steve reads the same object every frame, so a click takes effect
++    // on the frame it lands.
++    CMinecraftSettings m_MinecraftSettings;
++    CMinecraftOverlay m_MinecraftPanel;
  };
  
  #endif /* PLAYER_GAMEPLAYER_H */
+diff --git a/src/MinecraftFontAtlas.h b/src/MinecraftFontAtlas.h
+new file mode 100644
+index 0000000..ab08c82
+--- /dev/null
++++ b/src/MinecraftFontAtlas.h
+@@ -0,0 +1,150 @@
++// Generated by tools/panel/make-font-atlas.py -- do not edit.
++//
++// 95 glyphs (0x20..0x7E) in a 16x6 grid of 8x12 cells, 8-bit
++// coverage, base64. Cell (code - 0x20) lives at column/row of the grid.
++#ifndef PLAYER_MINECRAFTFONTATLAS_H
++#define PLAYER_MINECRAFTFONTATLAS_H
++
++namespace mc_font {
++
++constexpr int kCellWidth = 8;
++constexpr int kCellHeight = 12;
++constexpr int kColumns = 16;
++constexpr int kRows = 6;
++constexpr int kFirstCode = 0x20;
++constexpr int kGlyphCount = 95;
++
++constexpr const char *kAtlasBase64 =
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACzGgAAAAAXtwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHyEAAAAAABYgHxgAAAAAACSNpYyAAAAABxgAAAAAGDxvAcAAAAA"
++    "AGzv/0QAAAAAAGxsAAAAAAAAPZ4AAAAAAACbQgAAAAAOnkxSmhEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAABdQSAAAAAAAAAAAAAAAAfIQAAAAAAFiAfGAAAAAAAMQDxgIAAAB27P/4AAAAwCOYOgAFAAAAyC8AAAAAAAAAbGwAAAAA"
++    "AACcSwAAAAAAAEufAAAAAAA3ys06AAAAAABobAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABhiwAAAAAAAAAAAAAA"
++    "AAB8hAAAAAAAWIB8YAAAAGz//////wAAB+Y0YAAAAABj8b0ihFMAAACergIAAAAAAABsbAAAAAAAANQbAAAAAAAAGdcAAAAA"
++    "ADfKzToAAAAAAGhsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtEZAAAAAAAAAAAAAAAAAHd/AAAAAAAAAAAAAAAA"
++    "AFZxXGsAAAAAxJqKDgAAAAAQfn0PAAAAW3p1hwDAAAAAAAAAAAAAAAAA5wwAAAAAAAAJ6gAAAAAOnkxSmhEAAJD/////mAAA"
++    "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"
++    "AAAAaJQAAAAAAANE6gwAAA/YHhDHRwAAAAC9PwAAAABI0BYUzEwAAAAABmbkBwAAAAAAAAAAAAAAAAAAAAAAAAAAACiPggAA"
++    "AAAAAAAAAAB8kisAAAAAAAAAAAAAAAAAAFjk5VwAAAAAsP///1gAAED/////LAAACpbv5nwAAAAAAABolAAAAEz//ddJAAAA"
++    "AFvi8p0CAAAAKtkAAAAAAAOa8PCaAwAAANj7zzgAAAAAAJygAAAAAAAAjLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AACgYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACpdQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAANMLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AEHR9rsVAAAAAL/AAAAAADD//+6OAAAAACe/8aMGAABU//LCNQAAAAj/////SAAAANz///9wAAAAP8/vjgIAAFSoAACkXAAA"
++    "BP////8IAAAALP//rAAAAFSoAAe3aQAAAPQMAAAAAACU5QUF5ZgAAFT+JACcWAAAAGbl5moAAAAd20MMaI4AAAAVwr0YAAAA"
++    "MMwAE9c3AAAD12gMWzUAAFSoDFnnDAAACPQAAAAAAAAA3CAAAAAAABTqSBBqIQAAVKgAAKRcAAAAAHyAAAAAAAAAAFCsAAAA"
++    "VKgHtWoAAAAA9AwAAAAAAJSxVVawmAAAVOCQAJxYAAAZ7Csn6h4AAI5LQuiutQAAAGNzbmgAAAAwzAAX3CsAADLWAAAAAAAA"
++    "VKgAAMNGAAAI9AAAAAAAAADcIAAAAAAAXqoAAAAAAABUqAAApFwAAAAAfIAAAAAAAAAAUKwAAABUr7VvAAAAAAD0DAAAAAAA"
++    "lF2rq1yYAABUoMYMnFgAAFOxAACqWgAAuQHEJ0jAAAAAtCEduAAAADD///+jAAAATLoAAAAAAABUqAAAq18AAAj/////JAAA"
++    "ANz///8gAAB4jgCc/2QAAFT/////XAAAAAB8gAAAAAAAAABQrAAAAFT9y4MAAAAAAPQMAAAAAACUVJGRVJgAAFSgaGucWAAA"
++    "ZqAAAJltAAC+AMAAALgAAAz4///6EAAAMMwAD6xfAAAz1gAAAAAAAFSoAADDRwAACPQAAAAAAAAA3CAAAAAAAF+pAACMZAAA"
++    "VKgAAKRcAAAAAHyAAAAAAAAAAFWlAAAAVLAM2jsAAAAA9AwAAAAAAJRUAABUmAAAVKALx51YAABUsQAAqloAAMUExCdHwAAA"
++    "VpkAAJddAAAwzAAMpXkAAATaZw5cNQAAVKgMV+cNAAAI9AAAAAAAAADcIAAAAAAAFepFCJ9kAABUqAAApFwAAAAAfIAAAAAA"
++    "YEkLmYIAAABUqAA93A4AAAD0DAAAAAAAlFQAAFSYAABUoACN31gAABvtKifqHwAAi1xC6K61AACnVQAAUq8AADD///O1EwAA"
++    "ACvC8qMGAABU//LEOAAAAAj/////YAAAANwgAAAAAAAAQtHyshcAAFSoAACkXAAABP////8IAAAZtvTFGgAAAFSoAACLoQAA"
++    "APT///+QAACUVAAAVJgAAFSgACH9WAAAAGjm52wAAAAb3lsQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAsufXcBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALz/VAAAAAAAAAAAAAAA"
++    "AFD/xAAAAAAAAAAAAAAAAAAAAAAAAAAACP//87IPAAAAZuXmbAAAAEz//uZ0AAAAAIHq4FUAAADE/////8wAAEi0AACwTAAA"
++    "km4AAGyYAADrCAAAA+sAAEPGAQCbbwAAg4UAAIKJAAAg/////48AAAAAvCgAAAAAQ6wAAAAAAAAAACTEAAAAAAAExckGAAAA"
++    "AAAAAAAAAAAI9AAPsHoAABnsKyfqHwAATLABK/EdAAA52B4bkgAAAAAAfIQAAAAASLQAALBMAABEtQAAskoAAMUlAAAfyAAA"
++    "AJ9jOsMCAAAJ1yAd2QsAAAAAAAnEGQAAAAC8KAAAAAAAxikAAAAAAAAAJMQAAAAAAIh9do8AAAAAAAAAAAAAAAj0AA+wewAA"
++    "U7EAAKpbAABMsAAk6hcAADLEBwAAAAAAAAB8hAAAAABItAAAsEwAAAXmBwXmBwAAnUShoD+hAAAAEtTLJgAAAABOrKZTAAAA"
++    "AAAAlE8AAAAAALwoAAAAAABNoQAAAAAAAAAkxAAAAABGpQAAnk0AAAAAAAAAAAAACP//9LYRAABmoAAAmW4AAEz///dNAAAA"
++    "AFKjpVgAAAAAAHyEAAAAAEi0AACwTAAAAKhDPq0AAAB1Y7mzXnkAAAAAqcYAAAAAAAC0uAAAAAAAAEiVAAAAAAAAvCgAAAAA"
++    "AAHMIAAAAAAAACTEAAAAAAAAAAAAAAAAAAAAAAAAAAAI9AAAAAAAAFSxAACqXQAATLAFaLgAAAAAAAADujYAAAAAfIQAAAAA"
++    "RLQAALBHAAAAW4qFXwAAAE2Wn5mTUgAAAEO+nlkAAAAAAHyAAAAAAAATvAkAAAAAAAC8KAAAAAAAAFeWAAAAAAAAJMQAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAj0AAAAAAAAGu0qJ+geAABMsAAAw0AAADZzFBvQRgAAAAB8hAAAAAAk3h0d3SgAAAARzccUAAAA"
++    "JephXekqAAAM1iUV2BEAAAAAfIAAAAAAAKUvAAAAAAAAALwoAAAAAAAAAtEZAAAAAAAkxAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "CPQAAAAAAAAAaOb/dQAAAEywAABGwgAABYbq7ZQCAAAAAHyEAAAAAAB27Ox5AAAAAAC+wAAAAAAD+CMf/AYAAJR5AABsmwAA"
++    "AAB8gAAAAAA0/////7QAAAAAvCgAAAAAAAAAYYsAAAAAACTEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEeuAQAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAC8/1QAAAAAAAAF1BIAAABQ/8QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAP///////wQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABCpwAAAAAA"
++    "AAAAAAAAAAAQ2AAAAAAAAAAAAAAAAAAAAAAAANAYAAAAAAAAAAAAAAAAH9f/MAAAAAAAAAAAAAAM2AAAAAAAAAAAWIwAAAAA"
++    "AAAQ1AAAAAAA2BQAAAAAADj//yAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAByWwAAAAAAAAAAAAAAABDYAAAAAAAA"
++    "AAAAAAAAAAAAAAAA0BgAAAAAAAAAAAAAAAB8fAAAAAAAAAAAAAAAAAzYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADYFAAAAAAA"
++    "AADIIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAENgAAAAAAAAAAAAAAAAAAAAAAADQGAAA"
++    "AAAAAAAAAAAAAJVQAAAAAAAAAAAAAAAADNgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANgUAAAAAAAAAMggAAAAAAAAAAAAAAAA"
++    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPT/5G8AAAAQ2qzylAAAAAAtxPf/MAAAAI/xtNMYAAAAaOLwkAAAAAz/////MAAA"
++    "AI3xuNQYAAAM2aX1jQAAAADA/4wAAAAAAKD/1AAAAAAA2BQ2wR8AAAAAyCAAAAAAeMXjh+00AAAM2aX1jQAAAAB56ut9AAAA"
++    "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"
++    ;
++
++} // namespace mc_font
++
++#endif
+diff --git a/src/MinecraftOverlay.cpp b/src/MinecraftOverlay.cpp
+new file mode 100644
+index 0000000..76d5a40
+--- /dev/null
++++ b/src/MinecraftOverlay.cpp
+@@ -0,0 +1,746 @@
++#include "MinecraftOverlay.h"
++
++#include "MinecraftFontAtlas.h"
++
++#include <math.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++namespace {
++
++void log_line(const char *fmt, ...)
++{
++    char buffer[512];
++    va_list args;
++    va_start(args, fmt);
++    vsnprintf(buffer, sizeof(buffer), fmt, args);
++    va_end(args);
++    fprintf(stderr, "[mc-panel] %s\n", buffer);
++    fflush(stderr);
++}
++
++bool env_flag(const char *name)
++{
++    const char *value = getenv(name);
++    if (!value || !*value) return false;
++    return strcmp(value, "0") != 0 && strcmp(value, "off") != 0 && strcmp(value, "false") != 0;
++}
++
++// The atlas is written as base64 so the header stays text: 9216 bytes of 8-bit
++// coverage is 12 KB as base64, which survives every tool that feels like
++// re-encoding a source file.
++int decode_base64(const char *text, unsigned char *out, int capacity)
++{
++    static const char kAlphabet[] =
++        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    int table[256];
++    for (int i = 0; i < 256; ++i) table[i] = -1;
++    for (int i = 0; i < 64; ++i) table[(unsigned char)kAlphabet[i]] = i;
++    int written = 0;
++    unsigned int accumulator = 0;
++    int bits = 0;
++    for (const char *p = text; *p; ++p)
++    {
++        const int value = table[(unsigned char)*p];
++        if (value < 0) continue;
++        accumulator = (accumulator << 6) | (unsigned int)value;
++        bits += 6;
++        if (bits >= 8)
++        {
++            bits -= 8;
++            if (written >= capacity) return written;
++            out[written++] = (unsigned char)((accumulator >> bits) & 0xFF);
++        }
++    }
++    return written;
++}
++
++// The glyph grid is 128x72; the texture is padded to 128x128 so both sides are
++// powers of two, which the rasterizer wants for mipmapping and wrapping.
++constexpr int kAtlasWidth = 128;
++constexpr int kAtlasHeight = 128;
++
++// A key pressed and released inside one frame is invisible to IsKeyDown(): SDL
++// can deliver both events before the frame polls. The key buffer keeps every
++// event of the frame, so the press is still readable there. Same helper as
++// MinecraftSteve.cpp.
++bool key_tapped(CKInputManager *input, CKDWORD key)
++{
++    const int count = input->GetNumberOfKeyInBuffer();
++    for (int i = 0; i < count; ++i)
++    {
++        CKDWORD buffered = 0;
++        if (input->GetKeyFromBuffer(i, buffered) == KEY_PRESSED && buffered == key) return true;
++    }
++    return false;
++}
++
++CKDWORD rgba(unsigned r, unsigned g, unsigned b, unsigned a)
++{
++    // Through VxColor so the byte order matches everything else the engine
++    // draws, rather than a hand-rolled shift that only looks right on one
++    // rasterizer.
++    return VxColor((float)r / 255.0f, (float)g / 255.0f, (float)b / 255.0f,
++                   (float)a / 255.0f)
++        .GetRGBA();
++}
++
++CKDWORD colour_backdrop() { static const CKDWORD v = rgba(0, 0, 0, 150); return v; }
++CKDWORD colour_panel() { static const CKDWORD v = rgba(20, 22, 27, 240); return v; }
++CKDWORD colour_border() { static const CKDWORD v = rgba(94, 104, 120, 255); return v; }
++CKDWORD colour_title() { static const CKDWORD v = rgba(240, 244, 248, 255); return v; }
++CKDWORD colour_label() { static const CKDWORD v = rgba(206, 212, 220, 255); return v; }
++CKDWORD colour_muted() { static const CKDWORD v = rgba(140, 148, 160, 255); return v; }
++CKDWORD colour_on() { static const CKDWORD v = rgba(104, 190, 92, 255); return v; }
++CKDWORD colour_off() { static const CKDWORD v = rgba(52, 58, 68, 255); return v; }
++CKDWORD colour_hover() { static const CKDWORD v = rgba(52, 62, 78, 190); return v; }
++CKDWORD colour_env() { static const CKDWORD v = rgba(236, 178, 66, 255); return v; }
++CKDWORD colour_value() { static const CKDWORD v = rgba(120, 200, 240, 255); return v; }
++
++bool inside(const float left, const float top, const float right, const float bottom,
++            const float x, const float y)
++{
++    return x >= left && x <= right && y >= top && y <= bottom;
++}
++
++} // namespace
++
++CMinecraftOverlay::CMinecraftOverlay()
++    : m_Settings(nullptr), m_FontTexture(nullptr), m_Material(nullptr), m_FontTextureId(0),
++      m_MaterialId(0), m_CallbackInstalled(false), m_ResourcesFailed(false), m_Open(false),
++      m_LeftDown(false), m_F1Down(false), m_EscapeDown(false), m_FrozenTime(false),
++      m_SavedTimeScale(1.0f),
++      m_OpenedByTest(false), m_HoverRow(-1), m_HoverButton(0), m_Dirty(false), m_Scale(1.0f),
++      m_CellWidth(8.0f), m_CellHeight(12.0f), m_PanelLeft(0.0f), m_PanelTop(0.0f),
++      m_PanelRight(0.0f), m_PanelBottom(0.0f), m_Elapsed(0.0f), m_PointerStamp(-1.0f)
++{
++    for (int i = 0; i < eMcRowCount; ++i)
++    {
++        m_Rows[i].valid = false;
++        m_Minus[i].valid = false;
++        m_Plus[i].valid = false;
++    }
++    m_Reset.valid = false;
++    m_Close.valid = false;
++}
++
++CMinecraftOverlay::~CMinecraftOverlay() {}
++
++bool CMinecraftOverlay::EnsureResources(CKContext *context, CKRenderContext *renderContext)
++{
++    if (m_ResourcesFailed) return false;
++    if (m_FontTexture && m_Material)
++    {
++        if (!m_CallbackInstalled && renderContext)
++        {
++            renderContext->AddPostSpriteRenderCallBack(&CMinecraftOverlay::RenderCallback, this,
++                                                       FALSE);
++            m_CallbackInstalled = true;
++        }
++        return true;
++    }
++    if (!context) return false;
++
++    // The font atlas, decoded into a texture the 2D pass can sample: white pixels
++    // with the coverage in alpha, so a vertex colour tints the text and nothing
++    // has to be re-baked to change a colour.
++    m_FontTexture = (CKTexture *)context->CreateObject(CKCID_TEXTURE, "MinecraftPanelFont");
++    if (!m_FontTexture)
++    {
++        log_line("CreateObject(CKCID_TEXTURE) failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    m_FontTexture->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    if (!m_FontTexture->CreateImage(kAtlasWidth, kAtlasHeight, 32))
++    {
++        log_line("CreateImage failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    CKBYTE *pixels = m_FontTexture->LockSurfacePtr(0);
++    if (!pixels)
++    {
++        log_line("LockSurfacePtr failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    memset(pixels, 0, (size_t)kAtlasWidth * kAtlasHeight * 4u);
++
++    static unsigned char coverage[128 * 96];
++    const int decoded = decode_base64(mc_font::kAtlasBase64, coverage, (int)sizeof(coverage));
++    const int coverageWidth = mc_font::kCellWidth * mc_font::kColumns;
++    const int coverageHeight = mc_font::kCellHeight * mc_font::kRows;
++    for (int y = 0; y < coverageHeight && y < kAtlasHeight; ++y)
++    {
++        for (int x = 0; x < coverageWidth && x < kAtlasWidth; ++x)
++        {
++            const int source = y * coverageWidth + x;
++            if (source >= decoded) continue;
++            const unsigned char alpha = coverage[source];
++            if (!alpha) continue;
++            CKBYTE *p = pixels + ((size_t)y * kAtlasWidth + (size_t)x) * 4u;
++            p[0] = 255; // b
++            p[1] = 255; // g
++            p[2] = 255; // r
++            p[3] = alpha;
++        }
++    }
++    m_FontTexture->ReleaseSurfacePtr(0);
++    m_FontTexture->SetUserMipMapMode(FALSE);
++    m_FontTexture->FreeVideoMemory();
++    m_FontTextureId = m_FontTexture->GetID();
++
++    m_Material = (CKMaterial *)context->CreateObject(CKCID_MATERIAL, "MinecraftPanelMaterial");
++    if (!m_Material)
++    {
++        log_line("CreateObject(CKCID_MATERIAL) failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    m_Material->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    m_Material->SetTexture(0, m_FontTexture);
++    m_Material->SetTwoSided(TRUE);
++    m_Material->SetDiffuse(VxColor(1.0f, 1.0f, 1.0f, 1.0f));
++    m_Material->SetSpecular(VxColor(0.0f, 0.0f, 0.0f, 1.0f));
++    m_MaterialId = m_Material->GetID();
++
++    if (renderContext && !m_CallbackInstalled)
++    {
++        renderContext->AddPostSpriteRenderCallBack(&CMinecraftOverlay::RenderCallback, this, FALSE);
++        m_CallbackInstalled = true;
++    }
++    log_line("font atlas: %d bytes decoded, %dx%d texture", decoded, kAtlasWidth, kAtlasHeight);
++    return true;
++}
++
++void CMinecraftOverlay::SetOpen(CKContext *context, bool open)
++{
++    if (open == m_Open) return;
++    m_Open = open;
++    log_line("panel %s", open ? "opened" : "closed");
++    if (!context) return;
++    // Freeze the world by stopping time, not by pausing the context.
++    //
++    // CKContext::Pause() is the obvious call and the one the engine itself
++    // makes, but CKContext::Process() skips ExecuteManagersPreProcess() while
++    // the context is paused -- and the SDL input manager is a PreProcess
++    // manager. A paused context stops receiving every mouse and key event,
++    // including the click meant to toggle a row and the F1 meant to close the
++    // panel: it could draw, but never react. (Measured: with the pause in
++    // place, a real xdotool click on a row produced no press at all, and
++    // every key press was equally absent.)
++    //
++    // Zero time scale leaves the context playing, so input keeps being pumped,
++    // and multiplies every frame delta by zero, so the level stands still.
++    CKTimeManager *timeManager = (CKTimeManager *)context->GetManagerByGuid(TIME_MANAGER_GUID);
++    if (open)
++    {
++        if (timeManager && !m_FrozenTime)
++        {
++            m_SavedTimeScale = timeManager->GetTimeScaleFactor();
++            timeManager->SetTimeScaleFactor(0.0f);
++            m_FrozenTime = true;
++        }
++    }
++    else if (m_FrozenTime)
++    {
++        if (timeManager) timeManager->SetTimeScaleFactor(m_SavedTimeScale);
++        m_FrozenTime = false;
++    }
++}
++
++void CMinecraftOverlay::Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds)
++{
++    if (!context || !renderContext || !m_Settings) return;
++    if (!EnsureResources(context, renderContext)) return;
++    m_Elapsed += deltaSeconds;
++
++    // Test hook: the screenshot harness cannot press F1 before it grabs a frame,
++    // so BALLANCE_MC_PANEL_TEST=1 opens the panel once at startup.
++    static const bool forceOpen = env_flag("BALLANCE_MC_PANEL_TEST");
++    if (forceOpen && !m_OpenedByTest)
++    {
++        m_OpenedByTest = true;
++        SetOpen(context, true);
++    }
++
++    ComputeLayout(renderContext);
++
++    // Diagnostic: print the rects the drawing and the hit test share, so a
++    // scripted click can aim at their centres instead of a hard-coded guess.
++    // If a click lands where this says it should and nothing happens, the
++    // mouse coordinate space is the problem, not the layout.
++    static const bool logLayout = env_flag("BALLANCE_MC_PANEL_LAYOUT");
++    static bool layoutLogged = false;
++    if (logLayout && !layoutLogged && m_Open)
++    {
++        layoutLogged = true;
++        log_line("layout: window %dx%d panel %.1f,%.1f..%.1f,%.1f",
++                 renderContext->GetWidth(), renderContext->GetHeight(), m_PanelLeft, m_PanelTop,
++                 m_PanelRight, m_PanelBottom);
++        for (int row = 0; row < eMcRowCount; ++row)
++        {
++            const char *kind = CMinecraftSettings::IsBoolRow(row) ? "bool" : "number";
++            log_line("layout: row %d %s %s %.1f,%.1f..%.1f,%.1f", row,
++                     CMinecraftSettings::GetKeyName(row), kind, m_Rows[row].left,
++                     m_Rows[row].top, m_Rows[row].right, m_Rows[row].bottom);
++            if (!CMinecraftSettings::IsBoolRow(row))
++                log_line("layout: row %d minus %.1f,%.1f..%.1f,%.1f plus %.1f,%.1f..%.1f,%.1f", row,
++                         m_Minus[row].left, m_Minus[row].top, m_Minus[row].right, m_Minus[row].bottom,
++                         m_Plus[row].left, m_Plus[row].top, m_Plus[row].right, m_Plus[row].bottom);
++        }
++        log_line("layout: reset %.1f,%.1f..%.1f,%.1f", m_Reset.left, m_Reset.top, m_Reset.right,
++                 m_Reset.bottom);
++    }
++
++    HandleInput(context, renderContext);
++    if (m_Open)
++    {
++        CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++        if (input) input->ShowCursor(TRUE);
++        // Re-assert the freeze every frame: a level script is free to set the
++        // time scale back, and the panel is an overlay that must not let the
++        // world start rolling underneath it.
++        CKTimeManager *timeManager = (CKTimeManager *)context->GetManagerByGuid(TIME_MANAGER_GUID);
++        if (timeManager && m_FrozenTime && timeManager->GetTimeScaleFactor() != 0.0f)
++            timeManager->SetTimeScaleFactor(0.0f);
++    }
++    // Pointer diagnostic: the panel cannot tell "the click missed" from "the
++    // click never arrived" without printing what the input manager believes
++    // about the pointer. Off unless asked for.
++    static const bool logPointer = env_flag("BALLANCE_MC_PANEL_POINTER");
++    if (logPointer && m_Open && m_Elapsed - m_PointerStamp > 0.4f)
++    {
++        m_PointerStamp = m_Elapsed;
++        CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++        if (input)
++        {
++            Vx2DVector windowPosition;
++            Vx2DVector absolutePosition;
++            input->GetMousePosition(windowPosition, FALSE);
++            input->GetMousePosition(absolutePosition, TRUE);
++            log_line("pointer window %.1f,%.1f absolute %.1f,%.1f left %d", windowPosition.x,
++                     windowPosition.y, absolutePosition.x, absolutePosition.y,
++                     input->IsMouseButtonDown(CK_MOUSEBUTTON_LEFT) ? 1 : 0);
++        }
++    }
++    if (m_Dirty)
++    {
++        m_Dirty = false;
++        if (m_Settings->Save()) log_line("saved %s", m_Settings->GetPath());
++        else log_line("could not write %s", m_Settings->GetPath());
++    }
++}
++
++void CMinecraftOverlay::ComputeLayout(CKRenderContext *renderContext)
++{
++    const int width = renderContext->GetWidth();
++    const int height = renderContext->GetHeight();
++    // The atlas is baked for a 640x480 window; the scale follows the window so
++    // text stays legible without a per-resolution layout.
++    float scale = (float)width / 640.0f * 1.6f;
++    if (scale < 1.0f) scale = 1.0f;
++    if (scale > 3.0f) scale = 3.0f;
++    m_Scale = scale;
++    m_CellWidth = mc_font::kCellWidth * scale;
++    m_CellHeight = mc_font::kCellHeight * scale;
++
++    const float pad = m_CellHeight * 1.4f;
++    const float rowHeight = m_CellHeight * 1.9f;
++    const int columns = 38;
++    const float panelWidth = (float)columns * m_CellWidth + pad * 2.0f;
++    const float titleHeight = m_CellHeight * 2.2f;
++    const float footerHeight = m_CellHeight * 2.0f;
++    const float panelHeight =
++        pad + titleHeight + eMcRowCount * rowHeight + rowHeight * 1.2f + footerHeight + pad * 0.5f;
++
++    m_PanelLeft = ((float)width - panelWidth) * 0.5f;
++    m_PanelTop = ((float)height - panelHeight) * 0.5f;
++    if (m_PanelTop < pad * 0.5f) m_PanelTop = pad * 0.5f;
++    m_PanelRight = m_PanelLeft + panelWidth;
++    m_PanelBottom = m_PanelTop + panelHeight;
++
++    const float rowLeft = m_PanelLeft + pad * 0.4f;
++    const float rowRight = m_PanelRight - pad * 0.4f;
++    float top = m_PanelTop + pad + titleHeight;
++    for (int row = 0; row < eMcRowCount; ++row)
++    {
++        m_Rows[row].left = rowLeft;
++        m_Rows[row].top = top + rowHeight * 0.1f;
++        m_Rows[row].right = rowRight;
++        m_Rows[row].bottom = top + rowHeight * 0.9f;
++        m_Rows[row].valid = true;
++
++        // The +/- boxes only exist for the numeric rows; a boolean row is one big
++        // target, which is what a player expects from a checkbox.
++        const bool isBool = CMinecraftSettings::IsBoolRow(row);
++        const float boxSide = m_CellHeight;
++        m_Minus[row].left = rowRight - m_CellWidth * 9.0f;
++        m_Minus[row].top = top + (rowHeight - boxSide) * 0.5f;
++        m_Minus[row].right = m_Minus[row].left + boxSide;
++        m_Minus[row].bottom = m_Minus[row].top + boxSide;
++        m_Minus[row].valid = !isBool;
++
++        m_Plus[row].left = rowRight - boxSide;
++        m_Plus[row].top = m_Minus[row].top;
++        m_Plus[row].right = rowRight;
++        m_Plus[row].bottom = m_Minus[row].top + boxSide;
++        m_Plus[row].valid = !isBool;
++
++        top += rowHeight;
++    }
++
++    const float resetWidth = m_CellWidth * 22.0f;
++    const float resetHeight = rowHeight * 0.85f;
++    m_Reset.left = (m_PanelLeft + m_PanelRight - resetWidth) * 0.5f;
++    m_Reset.top = top + rowHeight * 0.15f;
++    m_Reset.right = m_Reset.left + resetWidth;
++    m_Reset.bottom = m_Reset.top + resetHeight;
++    m_Reset.valid = true;
++
++    m_Close.left = m_PanelRight - m_CellWidth * 4.0f;
++    m_Close.top = m_PanelTop + pad * 0.4f;
++    m_Close.right = m_PanelRight - pad * 0.4f;
++    m_Close.bottom = m_Close.top + m_CellHeight * 1.2f;
++    m_Close.valid = false; // no separate close button: F1 and Escape are the keys
++}
++
++void CMinecraftOverlay::HandleInput(CKContext *context, CKRenderContext *renderContext)
++{
++    (void)renderContext;
++    CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (!input) return;
++
++    // F1 anywhere. The key only has to survive one frame -- see key_tapped for
++    // the tap that starts and ends inside a single frame.
++    const bool f1 = input->IsKeyDown(CKKEY_F1) != FALSE || key_tapped(input, CKKEY_F1);
++    if (f1 && !m_F1Down) SetOpen(context, !m_Open);
++    m_F1Down = f1;
++
++    if (!m_Open)
++    {
++        m_HoverRow = -1;
++        m_HoverButton = 0;
++        m_LeftDown = input->IsMouseButtonDown(CK_MOUSEBUTTON_LEFT) != FALSE;
++        return;
++    }
++
++    // Escape closes too: it is the key a player's hand is already on. It is also
++    // the game's own menu key, so the pause menu may open behind the panel; the
++    // panel draws on top and owns the clicks.
++    const bool escape = input->IsKeyDown(CKKEY_ESCAPE) != FALSE || key_tapped(input, CKKEY_ESCAPE);
++    if (escape && !m_EscapeDown) SetOpen(context, false);
++    m_EscapeDown = escape;
++
++    Vx2DVector position;
++    input->GetMousePosition(position, FALSE);
++    const float x = position.x;
++    const float y = position.y;
++
++    m_HoverRow = -1;
++    m_HoverButton = 0;
++    for (int row = 0; row < eMcRowCount; ++row)
++    {
++        if (!m_Rows[row].valid) continue;
++        if (!inside(m_Rows[row].left, m_Rows[row].top, m_Rows[row].right, m_Rows[row].bottom, x, y))
++            continue;
++        m_HoverRow = row;
++        if (m_Minus[row].valid &&
++            inside(m_Minus[row].left, m_Minus[row].top, m_Minus[row].right, m_Minus[row].bottom, x, y))
++            m_HoverButton = 1 + row * 2;
++        else if (m_Plus[row].valid &&
++                 inside(m_Plus[row].left, m_Plus[row].top, m_Plus[row].right, m_Plus[row].bottom, x, y))
++            m_HoverButton = 2 + row * 2;
++        break;
++    }
++    const bool overReset =
++        m_Reset.valid && inside(m_Reset.left, m_Reset.top, m_Reset.right, m_Reset.bottom, x, y);
++
++    const bool left = input->IsMouseButtonDown(CK_MOUSEBUTTON_LEFT) != FALSE;
++    if (left && !m_LeftDown)
++    {
++        // Every press is logged, including a miss: a click that changes nothing
++        // is otherwise indistinguishable from a click that never arrived.
++        log_line("click at %.1f,%.1f row %d button %d%s", x, y, m_HoverRow, m_HoverButton,
++                 overReset ? " reset" : "");
++        if (overReset)
++        {
++            m_Settings->ResetToDefaults();
++            m_Dirty = true;
++            log_line("restored defaults");
++        }
++        else if (m_HoverRow >= 0 && m_HoverButton == 0)
++        {
++            if (CMinecraftSettings::IsBoolRow(m_HoverRow))
++            {
++                const bool value = !m_Settings->GetBool(m_HoverRow);
++                m_Settings->SetBool(m_HoverRow, value);
++                m_Dirty = true;
++                log_line("%s = %d%s", CMinecraftSettings::GetKeyName(m_HoverRow), value ? 1 : 0,
++                         m_Settings->IsEnvironmentLocked(m_HoverRow) ? " (environment wins)" : "");
++            }
++        }
++        else if (m_HoverButton > 0 && m_HoverButton != 100)
++        {
++            const int row = (m_HoverButton - 1) / 2;
++            const bool plus = ((m_HoverButton - 1) % 2) == 1;
++            if (row >= 0 && row < eMcRowCount && !CMinecraftSettings::IsBoolRow(row))
++            {
++                m_Settings->StepFloat(row, plus ? 1 : -1);
++                m_Dirty = true;
++                log_line("%s = %.4f", CMinecraftSettings::GetKeyName(row), m_Settings->GetFloat(row));
++            }
++        }
++    }
++    m_LeftDown = left;
++}
++
++namespace {
++
++// One textured, tinted quad: the unit every glyph is made of. Same primitive
++// flags as the interface building blocks' own sprite drawing
++// (BuildingBlocks/Interface/DrawingPrimitives.cpp), so it lands in the same 2D
++// space without a transform of our own.
++void draw_glyph(CKRenderContext *device, float left, float top, float right, float bottom,
++                float u0, float v0, float u1, float v1, CKDWORD color)
++{
++    VxDrawPrimitiveData *data = device->GetDrawPrimitiveStructure(CKRST_DP_CL_VCT, 4);
++    if (!data) return;
++#if CKVERSION == 0x13022002 || CKVERSION == 0x05082002
++    VxVector4 *positions = (VxVector4 *)data->PositionPtr;
++    const unsigned int positionStride = data->PositionStride;
++    CKDWORD *colors = (CKDWORD *)data->ColorPtr;
++    VxUV *uvs = (VxUV *)data->TexCoordPtr;
++    const unsigned int uvStride = data->TexCoordStride;
++    VxFillStructure(4, colors, data->ColorStride, 4, &color);
++#else
++    VxVector4 *positions = (VxVector4 *)data->Positions.Ptr;
++    const unsigned int positionStride = data->Positions.Stride;
++    CKDWORD *colors = (CKDWORD *)data->Colors.Ptr;
++    VxUV *uvs = (VxUV *)data->TexCoord.Ptr;
++    const unsigned int uvStride = data->TexCoord.Stride;
++    VxFillStructure(4, colors, data->Colors.Stride, 4, &color);
++#endif
++
++    const float xs[4] = {left, right, right, left};
++    const float ys[4] = {top, top, bottom, bottom};
++    const float us[4] = {u0, u1, u1, u0};
++    const float vs[4] = {v0, v0, v1, v1};
++    for (int i = 0; i < 4; ++i)
++    {
++        positions->x = xs[i];
++        positions->y = ys[i];
++        positions->z = 0.0f;
++        positions->w = 1.0f;
++        positions = (VxVector4 *)((CKBYTE *)positions + positionStride);
++        uvs->u = us[i];
++        uvs->v = vs[i];
++        uvs = (VxUV *)((CKBYTE *)uvs + uvStride);
++    }
++    device->DrawPrimitive(VX_TRIANGLEFAN, NULL, 4, data);
++}
++
++} // namespace
++
++void CMinecraftOverlay::RenderCallback(CKRenderContext *device, void *argument)
++{
++    if (!device || !argument) return;
++    static_cast<CMinecraftOverlay *>(argument)->Draw(device);
++}
++
++void CMinecraftOverlay::FillRect(CKRenderContext *device, float left, float top, float right,
++                                 float bottom, CKDWORD color)
++{
++    if (!device || right <= left || bottom <= top) return;
++    device->SetTexture(NULL);
++    device->SetState(VXRENDERSTATE_CULLMODE, VXCULL_NONE);
++    device->SetState(VXRENDERSTATE_ZWRITEENABLE, FALSE);
++    device->SetState(VXRENDERSTATE_ALPHABLENDENABLE, TRUE);
++    device->SetState(VXRENDERSTATE_SRCBLEND, VXBLEND_SRCALPHA);
++    device->SetState(VXRENDERSTATE_DESTBLEND, VXBLEND_INVSRCALPHA);
++
++    VxDrawPrimitiveData *data = device->GetDrawPrimitiveStructure(CKRST_DP_CL_VC, 4);
++    if (!data) return;
++#if CKVERSION == 0x13022002 || CKVERSION == 0x05082002
++    VxVector4 *positions = (VxVector4 *)data->PositionPtr;
++    const unsigned int positionStride = data->PositionStride;
++    CKDWORD *colors = (CKDWORD *)data->ColorPtr;
++    VxFillStructure(4, colors, data->ColorStride, 4, &color);
++#else
++    VxVector4 *positions = (VxVector4 *)data->Positions.Ptr;
++    const unsigned int positionStride = data->Positions.Stride;
++    CKDWORD *colors = (CKDWORD *)data->Colors.Ptr;
++    VxFillStructure(4, colors, data->Colors.Stride, 4, &color);
++#endif
++
++    const float xs[4] = {left, right, right, left};
++    const float ys[4] = {top, top, bottom, bottom};
++    for (int i = 0; i < 4; ++i)
++    {
++        positions->x = xs[i];
++        positions->y = ys[i];
++        positions->z = 0.0f;
++        positions->w = 1.0f;
++        positions = (VxVector4 *)((CKBYTE *)positions + positionStride);
++    }
++    device->DrawPrimitive(VX_TRIANGLEFAN, NULL, 4, data);
++}
++
++float CMinecraftOverlay::TextWidth(const char *text) const
++{
++    return text ? (float)strlen(text) * m_CellWidth : 0.0f;
++}
++
++void CMinecraftOverlay::DrawText(CKRenderContext *device, float x, float y, const char *text,
++                                 CKDWORD color)
++{
++    if (!device || !text || !m_Material) return;
++    m_Material->SetAsCurrent(device);
++    device->SetState(VXRENDERSTATE_ALPHABLENDENABLE, TRUE);
++    device->SetState(VXRENDERSTATE_SRCBLEND, VXBLEND_SRCALPHA);
++    device->SetState(VXRENDERSTATE_DESTBLEND, VXBLEND_INVSRCALPHA);
++    device->SetState(VXRENDERSTATE_CULLMODE, VXCULL_NONE);
++    device->SetState(VXRENDERSTATE_ZWRITEENABLE, FALSE);
++    device->SetState(VXRENDERSTATE_LIGHTING, FALSE);
++
++    float cursor = x;
++    for (const char *p = text; *p; ++p)
++    {
++        const int code = (unsigned char)*p;
++        if (code > 0x20 && code < mc_font::kFirstCode + mc_font::kGlyphCount)
++        {
++            const int index = code - mc_font::kFirstCode;
++            const int cellX = (index % mc_font::kColumns) * mc_font::kCellWidth;
++            const int cellY = (index / mc_font::kColumns) * mc_font::kCellHeight;
++            const float u0 = (float)cellX / (float)kAtlasWidth;
++            const float v0 = (float)cellY / (float)kAtlasHeight;
++            const float u1 = (float)(cellX + mc_font::kCellWidth) / (float)kAtlasWidth;
++            const float v1 = (float)(cellY + mc_font::kCellHeight) / (float)kAtlasHeight;
++            draw_glyph(device, cursor, y, cursor + m_CellWidth, y + m_CellHeight, u0, v0, u1, v1,
++                       color);
++        }
++        cursor += m_CellWidth;
++    }
++}
++
++void CMinecraftOverlay::Draw(CKRenderContext *device)
++{
++    if (!m_Open || !m_Material || !m_Settings) return;
++
++    const float width = (float)device->GetWidth();
++    const float height = (float)device->GetHeight();
++
++    // Backdrop first: the world behind is still there, just held back, so the
++    // panel reads as an overlay rather than another menu.
++    FillRect(device, 0.0f, 0.0f, width, height, colour_backdrop());
++    FillRect(device, m_PanelLeft, m_PanelTop, m_PanelRight, m_PanelBottom, colour_panel());
++
++    const float border = m_Scale * 1.2f < 1.5f ? 1.5f : m_Scale * 1.2f;
++    FillRect(device, m_PanelLeft, m_PanelTop, m_PanelRight, m_PanelTop + border, colour_border());
++    FillRect(device, m_PanelLeft, m_PanelBottom - border, m_PanelRight, m_PanelBottom,
++             colour_border());
++    FillRect(device, m_PanelLeft, m_PanelTop, m_PanelLeft + border, m_PanelBottom, colour_border());
++    FillRect(device, m_PanelRight - border, m_PanelTop, m_PanelRight, m_PanelBottom,
++             colour_border());
++
++    const float pad = m_CellHeight * 1.4f;
++    const float textLeft = m_PanelLeft + pad;
++    const float titleY = m_PanelTop + pad;
++    DrawText(device, textLeft, titleY, "Minecraft in Ballance", colour_title());
++    DrawText(device, textLeft, titleY + m_CellHeight * 1.35f,
++             "F1 or Esc closes - changes are saved at once", colour_muted());
++
++    for (int row = 0; row < eMcRowCount; ++row)
++    {
++        const Hit &hit = m_Rows[row];
++        if (!hit.valid) continue;
++        const bool hovered = (row == m_HoverRow);
++        if (hovered) FillRect(device, hit.left, hit.top, hit.right, hit.bottom, colour_hover());
++
++        const float middle = (hit.top + hit.bottom) * 0.5f;
++        const float textY = middle - m_CellHeight * 0.5f;
++        const bool isBool = CMinecraftSettings::IsBoolRow(row);
++
++        float labelX = hit.left + m_CellHeight * 0.6f;
++        if (isBool)
++        {
++            // A square, a lit interior and a border: readable at every scale and
++            // unambiguous about on/off without needing a checkmark glyph.
++            const float side = m_CellHeight * 0.95f;
++            const float top = middle - side * 0.5f;
++            const bool on = m_Settings->GetBool(row);
++            FillRect(device, labelX, top, labelX + side, top + side, colour_border());
++            const float inset = m_Scale * 1.6f;
++            FillRect(device, labelX + inset, top + inset, labelX + side - inset,
++                     top + side - inset, on ? colour_on() : colour_off());
++            labelX += side + m_CellHeight * 0.7f;
++        }
++
++        DrawText(device, labelX, textY, CMinecraftSettings::GetLabel(row), colour_label());
++
++        if (m_Settings->IsEnvironmentLocked(row))
++            DrawText(device, hit.right - m_CellWidth * 13.0f, textY, "[env]", colour_env());
++
++        if (isBool) continue;
++
++        char value[32];
++        if (row == eMcScale) snprintf(value, sizeof(value), "%.2f", m_Settings->GetFloat(row));
++        else snprintf(value, sizeof(value), "%.4f", m_Settings->GetFloat(row));
++
++        const Hit &minus = m_Minus[row];
++        const Hit &plus = m_Plus[row];
++        const bool minusHover = m_HoverButton == 1 + row * 2;
++        const bool plusHover = m_HoverButton == 2 + row * 2;
++
++        FillRect(device, minus.left, minus.top, minus.right, minus.bottom,
++                 minusHover ? colour_border() : colour_off());
++        DrawText(device, minus.left + m_CellWidth * 0.28f, textY, "-", colour_value());
++
++        FillRect(device, plus.left, plus.top, plus.right, plus.bottom,
++                 plusHover ? colour_border() : colour_off());
++        DrawText(device, plus.left + m_CellWidth * 0.28f, textY, "+", colour_value());
++
++        const float valueWidth = TextWidth(value);
++        const float valueRight = minus.left - m_CellWidth * 0.6f;
++        DrawText(device, valueRight - valueWidth, textY, value, colour_value());
++    }
++
++    if (m_Reset.valid)
++    {
++        const bool hovered = m_HoverButton == 100;
++        FillRect(device, m_Reset.left, m_Reset.top, m_Reset.right, m_Reset.bottom,
++                 hovered ? colour_border() : colour_off());
++        const char *label = "Restore defaults";
++        const float textY = (m_Reset.top + m_Reset.bottom) * 0.5f - m_CellHeight * 0.5f;
++        DrawText(device, (m_Reset.left + m_Reset.right - TextWidth(label)) * 0.5f, textY, label,
++                 colour_label());
++    }
++
++    DrawText(device, textLeft, m_PanelBottom - pad, m_Settings->GetPath(), colour_muted());
++}
++
++void CMinecraftOverlay::Shutdown(CKContext *context)
++{
++    if (m_Open && m_FrozenTime && context)
++    {
++        CKTimeManager *timeManager = (CKTimeManager *)context->GetManagerByGuid(TIME_MANAGER_GUID);
++        if (timeManager) timeManager->SetTimeScaleFactor(m_SavedTimeScale);
++    }
++    m_Open = false;
++    m_FrozenTime = false;
++    m_CallbackInstalled = false;
++    if (!context) return;
++    if (m_FontTexture)
++    {
++        context->DestroyObject(m_FontTexture);
++        m_FontTexture = nullptr;
++    }
++    if (m_Material)
++    {
++        context->DestroyObject(m_Material);
++        m_Material = nullptr;
++    }
++}
+diff --git a/src/MinecraftOverlay.h b/src/MinecraftOverlay.h
+new file mode 100644
+index 0000000..b4d11e7
+--- /dev/null
++++ b/src/MinecraftOverlay.h
+@@ -0,0 +1,104 @@
++#ifndef PLAYER_MINECRAFTOVERLAY_H
++#define PLAYER_MINECRAFTOVERLAY_H
++
++#include "CKAll.h"
++
++#include "MinecraftSettings.h"
++
++// The settings panel: F1 opens it over whatever is on screen, the mouse picks
++// rows, and every change is written straight back to Minecraft.ini.
++//
++// Why an overlay rather than a menu object inside the game: Ballance's own
++// interface is a pile of 2D entities that live in the level's scene, so putting
++// a panel there would mean one panel per level, rebuilt on every level swap, in
++// a scripting format this port can only reach through the CK object tree. The
++// panel instead draws in the render context's post-sprite pass -- the same place
++// the game's Mouse Cursor building block draws -- so it exists exactly once,
++// works in the menu and in a level alike, and needs no scene of its own.
++//
++// Two pieces make it self-contained: a bitmap font baked by
++// tools/panel/make-font-atlas.py and decoded into a CKTexture at startup (the
++// port ships no font asset a hand-made overlay could borrow), and the CK
++// clipping-space primitives the interface building blocks themselves use to fill
++// rectangles (BuildingBlocks/Interface/DrawingPrimitives.cpp).
++//
++// While the panel is open the context is paused, so the world stops and the
++// clicks belong to the panel alone.
++class CMinecraftOverlay
++{
++public:
++    CMinecraftOverlay();
++    ~CMinecraftOverlay();
++
++    void SetSettings(CMinecraftSettings *settings) { m_Settings = settings; }
++
++    // Once per drawn frame, before CKRenderContext::Render().
++    void Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds);
++
++    void Shutdown(CKContext *context);
++
++    bool IsOpen() const { return m_Open; }
++
++private:
++    struct Hit
++    {
++        float left, top, right, bottom;
++        bool valid;
++    };
++
++    bool EnsureResources(CKContext *context, CKRenderContext *renderContext);
++    void HandleInput(CKContext *context, CKRenderContext *renderContext);
++    void ComputeLayout(CKRenderContext *renderContext);
++    void SetOpen(CKContext *context, bool open);
++
++    static void RenderCallback(CKRenderContext *device, void *argument);
++    void Draw(CKRenderContext *device);
++
++    void FillRect(CKRenderContext *device, float left, float top, float right, float bottom,
++                  CKDWORD color);
++    void DrawText(CKRenderContext *device, float x, float y, const char *text, CKDWORD color);
++    // Pixels across one character cell, so text can be measured before it is drawn.
++    float TextWidth(const char *text) const;
++
++    CMinecraftSettings *m_Settings;
++
++    CKTexture *m_FontTexture;
++    CKMaterial *m_Material;
++    CK_ID m_FontTextureId;
++    CK_ID m_MaterialId;
++    bool m_CallbackInstalled;
++    bool m_ResourcesFailed;
++
++    bool m_Open;
++    bool m_LeftDown;
++    bool m_F1Down;
++    bool m_EscapeDown;
++    // The panel freezes the world through the time scale factor (see SetOpen);
++    // both the saved value and the flag have to survive until the panel closes.
++    bool m_FrozenTime;
++    float m_SavedTimeScale;
++    bool m_OpenedByTest;
++    int m_HoverRow;
++    int m_HoverButton; // 0 = none, otherwise 1 + (row * 2) + side, 4 = reset
++    bool m_Dirty;
++
++    // Layout, recomputed every frame from the render context's size so a window
++    // resize needs no special case.
++    float m_Scale;
++    float m_CellWidth;
++    float m_CellHeight;
++    float m_PanelLeft;
++    float m_PanelTop;
++    float m_PanelRight;
++    float m_PanelBottom;
++    Hit m_Rows[eMcRowCount];
++    Hit m_Minus[eMcRowCount];
++    Hit m_Plus[eMcRowCount];
++    Hit m_Reset;
++    Hit m_Close;
++
++    float m_Elapsed;
++    float m_PointerStamp; // last pointer diagnostic, see Frame()
++};
++
++#endif // PLAYER_MINECRAFTOVERLAY_H
+diff --git a/src/MinecraftSettings.cpp b/src/MinecraftSettings.cpp
+new file mode 100644
+index 0000000..6a0a604
+--- /dev/null
++++ b/src/MinecraftSettings.cpp
+@@ -0,0 +1,293 @@
++#include "MinecraftSettings.h"
++
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++namespace {
++
++// One row's plumbing in one place: the ini key, the environment variable that
++// overrides it, the panel label, and the step a click on "-"/"+" takes.
++struct RowSpec
++{
++    const char *key;
++    const char *env;
++    const char *label;
++    bool isBool;
++    float step;
++    float minimum;
++    float maximum;
++    const char *comment;
++};
++
++const RowSpec kRows[] = {
++    {"Steve", "BALLANCE_MC_STEVE", "Steve in Ballance", true, 0.0f, 0.0f, 0.0f,
++     "; 1 = draw Steve in the level, 0 = the ordinary Ballance world.\n"},
++    {"FollowBall", "BALLANCE_MC_STEVE_BALL", "Follow the ball", true, 0.0f, 0.0f, 0.0f,
++     "; Walk with the ball. 0 leaves him where he started.\n"},
++    {"FirstPerson", "BALLANCE_MC_STEVE_FP", "First person", true, 0.0f, 0.0f, 0.0f,
++     "; Camera at Steve's eyes instead of the game camera.\n"},
++    {"HideSteve", "BALLANCE_MC_STEVE_HIDE", "Hide Steve", true, 0.0f, 0.0f, 0.0f,
++     "; Keep the model but do not draw it (for A/B screenshots).\n"},
++    {"HideBall", "BALLANCE_MC_STEVE_HIDEBALL", "Hide the ball", true, 0.0f, 0.0f, 0.0f,
++     "; Hide the ball so Steve is the only thing rolling.\n"},
++    {"Scale", "BALLANCE_MC_STEVE_SCALE", "Model scale", false, 0.05f, 0.05f, 2.0f,
++     "; Ballance units per model unit. Steve is 32 model units tall and the ball\n"
++     "; is 4 across, so 0.25 makes him twice the ball's height -- the default.\n"},
++    {"Sensitivity", "BALLANCE_MC_STEVE_SENS", "Mouse sensitivity", false, 0.0005f, 0.0005f,
++     0.02f,
++     "; Radians of yaw/pitch per pixel of pointer motion.\n"},
++    {"Debug", "BALLANCE_MC_STEVE_DEBUG", "Debug log", true, 0.0f, 0.0f, 0.0f,
++     "; Once a second, log where Steve is and what the gate decided.\n"},
++};
++
++constexpr int kRowCount = (int)(sizeof(kRows) / sizeof(kRows[0]));
++static_assert(kRowCount == eMcRowCount, "row table and enum disagree");
++
++const char *kHeader =
++    "; Minecraft in Ballance -- settings for the Steve passthrough.\n"
++    ";\n"
++    "; Written by the in-game panel (F1). Kept in its own file so the panel never\n"
++    "; edits Player.ini, which belongs to the engine.\n"
++    ";\n"
++    "; An environment variable of the same name wins over the value here: that is\n"
++    "; how the screenshot harnesses pin a setting for a single run. The panel\n"
++    "; marks any row the environment has taken over.\n"
++    "\n"
++    "[Minecraft]\n";
++
++bool file_exists(const char *path)
++{
++    FILE *file = fopen(path, "rb");
++    if (!file) return false;
++    fclose(file);
++    return true;
++}
++
++char *trim(char *text)
++{
++    while (*text == ' ' || *text == '\t') ++text;
++    char *end = text + strlen(text);
++    while (end > text &&
++           (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t')) --end;
++    *end = '\0';
++    return text;
++}
++
++bool parse_bool(const char *text, bool fallback)
++{
++    if (!text) return fallback;
++    if (!strcmp(text, "1") || !strcmp(text, "true") || !strcmp(text, "on") || !strcmp(text, "yes"))
++        return true;
++    if (!strcmp(text, "0") || !strcmp(text, "false") || !strcmp(text, "off") || !strcmp(text, "no"))
++        return false;
++    return fallback;
++}
++
++float parse_float(const char *text, float fallback)
++{
++    if (!text || !*text) return fallback;
++    char *end = NULL;
++    const double value = strtod(text, &end);
++    if (end == text) return fallback;
++    return (float)value;
++}
++
++} // namespace
++
++CMinecraftSettings::CMinecraftSettings() : m_Values(Defaults())
++{
++    for (int i = 0; i < eMcRowCount; ++i) m_EnvLocked[i] = false;
++}
++
++CMinecraftSettings::Values CMinecraftSettings::Defaults()
++{
++    Values values;
++    values.steve = true;
++    values.followBall = true;
++    values.firstPerson = false;
++    values.hideSteve = false;
++    values.hideBall = false;
++    values.debugLog = false;
++    // 32 model units tall against a ball that is 4 units across: 0.25 puts Steve
++    // at twice the ball's height, which is what the first screenshots were
++    // accepted against. Anything larger dwarfs the level.
++    values.scale = 0.25f;
++    values.sensitivity = 0.0025f;
++    return values;
++}
++
++void CMinecraftSettings::SetFromPlayerIni(const char *playerIniPath)
++{
++    m_Path = "Minecraft.ini";
++    if (!playerIniPath || !*playerIniPath) return;
++    // The settings live beside Player.ini, not in the working directory: the
++    // launchers change directory and the panel must write the same file the next
++    // launch reads.
++    const char *slash = strrchr(playerIniPath, '/');
++    if (!slash) return;
++    const size_t length = (size_t)(slash - playerIniPath) + 1u;
++    char buffer[1024];
++    if (length >= sizeof(buffer)) return;
++    memcpy(buffer, playerIniPath, length);
++    memcpy(buffer + length, "Minecraft.ini", sizeof("Minecraft.ini"));
++    m_Path = buffer;
++}
++
++bool CMinecraftSettings::IsBoolRow(int row)
++{
++    return row >= 0 && row < eMcRowCount && kRows[row].isBool;
++}
++
++const char *CMinecraftSettings::GetLabel(int row)
++{
++    return (row >= 0 && row < eMcRowCount) ? kRows[row].label : "";
++}
++
++const char *CMinecraftSettings::GetKeyName(int row)
++{
++    return (row >= 0 && row < eMcRowCount) ? kRows[row].key : "";
++}
++
++const char *CMinecraftSettings::GetEnvironmentName(int row)
++{
++    return (row >= 0 && row < eMcRowCount) ? kRows[row].env : "";
++}
++
++bool CMinecraftSettings::IsEnvironmentLocked(int row) const
++{
++    return row >= 0 && row < eMcRowCount && m_EnvLocked[row];
++}
++
++bool CMinecraftSettings::GetBool(int row) const
++{
++    switch (row)
++    {
++        case eMcSteve: return m_Values.steve;
++        case eMcFollowBall: return m_Values.followBall;
++        case eMcFirstPerson: return m_Values.firstPerson;
++        case eMcHideSteve: return m_Values.hideSteve;
++        case eMcHideBall: return m_Values.hideBall;
++        case eMcDebugLog: return m_Values.debugLog;
++        default: return false;
++    }
++}
++
++void CMinecraftSettings::SetBool(int row, bool value)
++{
++    switch (row)
++    {
++        case eMcSteve: m_Values.steve = value; break;
++        case eMcFollowBall: m_Values.followBall = value; break;
++        case eMcFirstPerson: m_Values.firstPerson = value; break;
++        case eMcHideSteve: m_Values.hideSteve = value; break;
++        case eMcHideBall: m_Values.hideBall = value; break;
++        case eMcDebugLog: m_Values.debugLog = value; break;
++        default: break;
++    }
++}
++
++float CMinecraftSettings::GetFloat(int row) const
++{
++    switch (row)
++    {
++        case eMcScale: return m_Values.scale;
++        case eMcSensitivity: return m_Values.sensitivity;
++        default: return 0.0f;
++    }
++}
++
++void CMinecraftSettings::SetFloat(int row, float value)
++{
++    if (row < 0 || row >= eMcRowCount || kRows[row].isBool) return;
++    if (value < kRows[row].minimum) value = kRows[row].minimum;
++    if (value > kRows[row].maximum) value = kRows[row].maximum;
++    switch (row)
++    {
++        case eMcScale: m_Values.scale = value; break;
++        case eMcSensitivity: m_Values.sensitivity = value; break;
++        default: break;
++    }
++}
++
++void CMinecraftSettings::StepFloat(int row, int steps)
++{
++    if (row < 0 || row >= eMcRowCount || kRows[row].isBool) return;
++    SetFloat(row, GetFloat(row) + kRows[row].step * (float)steps);
++}
++
++void CMinecraftSettings::ApplyEnvironment()
++{
++    for (int row = 0; row < eMcRowCount; ++row)
++    {
++        const char *value = getenv(kRows[row].env);
++        m_EnvLocked[row] = value != NULL;
++        if (!value) continue;
++        if (kRows[row].isBool) SetBool(row, parse_bool(value, GetBool(row)));
++        else SetFloat(row, parse_float(value, GetFloat(row)));
++    }
++}
++
++void CMinecraftSettings::ResetToDefaults()
++{
++    m_Values = Defaults();
++    ApplyEnvironment();
++}
++
++bool CMinecraftSettings::Load()
++{
++    m_Values = Defaults();
++
++    const bool existed = file_exists(m_Path.CStr());
++    if (existed)
++    {
++        FILE *file = fopen(m_Path.CStr(), "r");
++        if (!file)
++        {
++            ApplyEnvironment();
++            return false;
++        }
++        char line[512];
++        while (fgets(line, sizeof(line), file))
++        {
++            char *text = trim(line);
++            if (!*text || *text == ';' || *text == '#' || *text == '[') continue;
++            char *equals = strchr(text, '=');
++            if (!equals) continue;
++            *equals = '\0';
++            char *key = trim(text);
++            char *value = trim(equals + 1);
++            for (int row = 0; row < eMcRowCount; ++row)
++            {
++                if (strcmp(key, kRows[row].key) != 0) continue;
++                if (kRows[row].isBool) SetBool(row, parse_bool(value, GetBool(row)));
++                else SetFloat(row, parse_float(value, GetFloat(row)));
++                break;
++            }
++        }
++        fclose(file);
++    }
++
++    ApplyEnvironment();
++    // A file that does not exist yet is written straight away, so the settings
++    // are discoverable without opening the panel once.
++    if (!existed) return Save();
++    return true;
++}
++
++bool CMinecraftSettings::Save()
++{
++    if (m_Path.IsEmpty()) return false;
++    FILE *file = fopen(m_Path.CStr(), "w");
++    if (!file) return false;
++    fputs(kHeader, file);
++    for (int row = 0; row < eMcRowCount; ++row)
++    {
++        fputs(kRows[row].comment, file);
++        if (kRows[row].isBool) fprintf(file, "%s=%d\n", kRows[row].key, GetBool(row) ? 1 : 0);
++        else fprintf(file, "%s=%.4f\n", kRows[row].key, GetFloat(row));
++    }
++    fclose(file);
++    return true;
++}
+diff --git a/src/MinecraftSettings.h b/src/MinecraftSettings.h
+new file mode 100644
+index 0000000..53a9a34
+--- /dev/null
++++ b/src/MinecraftSettings.h
+@@ -0,0 +1,91 @@
++#ifndef PLAYER_MINECRAFTSETTINGS_H
++#define PLAYER_MINECRAFTSETTINGS_H
++
++#include "XString.h"
++
++// The rows a player may change, in panel order. One enum feeds the three places
++// that must not drift apart: the Minecraft.ini keys, the environment variables
++// that override them, and the rows CMinecraftOverlay draws.
++enum McSettingRow
++{
++    eMcSteve = 0,   // Steve=1           draw Steve in the level at all
++    eMcFollowBall,  // FollowBall=1      walk with the ball instead of standing still
++    eMcFirstPerson, // FirstPerson=0     camera at Steve's eyes
++    eMcHideSteve,   // HideSteve=0       keep the model, do not draw it
++    eMcHideBall,    // HideBall=0        hide the ball so only Steve is left
++    eMcScale,       // Scale=0.25        Ballance units per model unit
++    eMcSensitivity, // Sensitivity=0.0025 radians of yaw/pitch per mouse pixel
++    eMcDebugLog,    // Debug=0           once a second, log what Steve is doing
++    eMcRowCount
++};
++
++// Steve's user-facing options, in their own file so the panel can write them
++// without ever touching the engine's Player.ini.
++//
++// Two sources, in priority order:
++//
++//   environment variable -- this run only, for scripts and the screenshot
++//                           harnesses, which set the names they always did
++//   Minecraft.ini        -- the persistent default, written by the panel
++//
++// The environment wins, so no existing script changes behaviour; the panel marks
++// a row the environment has taken over, because otherwise a click that changes
++// nothing on screen reads as a broken button.
++class CMinecraftSettings
++{
++public:
++    struct Values
++    {
++        bool steve;
++        bool followBall;
++        bool firstPerson;
++        bool hideSteve;
++        bool hideBall;
++        bool debugLog;
++        float scale;
++        float sensitivity;
++    };
++
++    CMinecraftSettings();
++
++    // Called with the resolved Player.ini path; Minecraft.ini sits beside it, so
++    // one game directory holds one set of settings.
++    void SetFromPlayerIni(const char *playerIniPath);
++
++    const char *GetPath() const { return m_Path.CStr(); }
++
++    // Reads Minecraft.ini if it is there, then applies the environment on top.
++    // A missing file is not an error: the defaults are used and written out.
++    bool Load();
++    bool Save();
++
++    const Values &Get() const { return m_Values; }
++    void Set(const Values &values) { m_Values = values; }
++
++    // Panel access, by row: booleans toggle, numbers step.
++    static bool IsBoolRow(int row);
++    bool GetBool(int row) const;
++    void SetBool(int row, bool value);
++    float GetFloat(int row) const;
++    void SetFloat(int row, float value);
++    void StepFloat(int row, int steps);
++    static const char *GetLabel(int row);
++    static const char *GetKeyName(int row);
++    static const char *GetEnvironmentName(int row);
++    bool IsEnvironmentLocked(int row) const;
++
++    static Values Defaults();
++
++    // Panel action: back to the shipped values, with the environment re-applied
++    // on top so a harness that pinned a row keeps its pin.
++    void ResetToDefaults();
++
++private:
++    void ApplyEnvironment();
++
++    Values m_Values;
++    bool m_EnvLocked[eMcRowCount];
++    XString m_Path;
++};
++
++#endif // PLAYER_MINECRAFTSETTINGS_H
 diff --git a/src/MinecraftSteve.cpp b/src/MinecraftSteve.cpp
 new file mode 100644
-index 0000000..c295456
+index 0000000..9ac8ee0
 --- /dev/null
 +++ b/src/MinecraftSteve.cpp
-@@ -0,0 +1,953 @@
+@@ -0,0 +1,1130 @@
 +#include "MinecraftSteve.h"
++
++#include "MinecraftSettings.h"
 +
 +#include <map>
 +
@@ -1351,6 +2803,17 @@ index 0000000..c295456
 +
 +} // namespace
 +
++// A CK object can vanish under Steve: loading a level throws away the objects the
++// previous level brought in, and the avatar he put in the old scene and the ball
++// he was following go with them. Comparing the pointer against what the context
++// says that id is now is the only safe test -- dereferencing first is exactly the
++// crash this guards against (2026-11-05: click Start, click level 1, segfault).
++static bool ObjectStillThere(CKContext *context, CKObject *object, CK_ID id)
++{
++    if (!context || !object || !id) return false;
++    return context->GetObject(id) == object;
++}
++
 +CMinecraftSteve::CMinecraftSteve()
 +    : m_Enabled(false), m_Built(false), m_FirstPerson(false), m_UseFixedPosition(false),
 +      m_FollowBall(true), m_Debug(false), m_YawGiven(false), m_LogPending(true), m_DebugTimerReady(false), m_BuildFailed(false), m_Scale(0.25f),
@@ -1364,21 +2827,40 @@ index 0000000..c295456
 +      m_CursorArmed(false), m_MenuKeyUp(false), m_EscapeHeld(false), m_MovementHeld(false),
 +      m_CamOffset(0.0f, 0.0f, 0.0f),
 +      m_Mesh(nullptr), m_Entity(nullptr), m_Ball(nullptr), m_Camera(nullptr), m_Texture(nullptr),
-+      m_Material(nullptr), m_Height(kModelHeight), m_EyeHeight(kModelEyeHeight) {}
++      m_Material(nullptr), m_EntityId(0), m_BallId(0), m_CameraId(0), m_Scene(nullptr),
++      m_InLevel(true), m_Settings(nullptr), m_PanelOpen(false), m_EnvironmentRead(false),
++      m_LevelOverride(-1), m_AvatarShown(false),
++      m_Height(kModelHeight), m_EyeHeight(kModelEyeHeight) {}
 +
 +CMinecraftSteve::~CMinecraftSteve() {}
 +
 +bool CMinecraftSteve::ReadEnvironment() {
-+    m_Enabled = env_flag("BALLANCE_MC_STEVE");
-+    if (!m_Enabled) return false;
-+
-+    m_FirstPerson = env_flag("BALLANCE_MC_STEVE_FP");
-+    m_Debug = env_flag("BALLANCE_MC_STEVE_DEBUG");
++    // The scale has to be resolved before the "is Steve on at all" bail below,
++    // because m_Height and m_EyeHeight are derived from it and everything
++    // downstream (placement, the first-person camera) trusts them. Without an
++    // env var the bail returned early and left m_Height at the constructor's
++    // kModelHeight, i.e. 32 units instead of 8: Steve was drawn at the right
++    // size (the entity carries m_Scale) but placed as if he were four times
++    // taller. The eight panel rows are re-applied every frame by
++    // ApplySettings(), so this is only the starting value.
 +    m_Scale = env_float("BALLANCE_MC_STEVE_SCALE", 0.25f);
 +    if (m_Scale <= 0.0f) m_Scale = 0.25f;
 +    m_Height = kModelHeight * m_Scale;
 +    m_EyeHeight = kModelEyeHeight * m_Scale;
 +
++    m_Enabled = env_flag("BALLANCE_MC_STEVE");
++    if (!m_Enabled) return false;
++
++    m_FirstPerson = env_flag("BALLANCE_MC_STEVE_FP");
++    m_Debug = env_flag("BALLANCE_MC_STEVE_DEBUG");
++    // -1 = decide from the camera, 0 = "pretend a menu is up", 1 = "pretend a
++    // level is running". The screenshots harnesses run with a merged level and
++    // no in-game camera, so they say 1 explicitly.
++    m_LevelOverride = -1;
++    if (const char *level = getenv("BALLANCE_MC_STEVE_LEVEL")) {
++        if (*level == '1') m_LevelOverride = 1;
++        else if (*level == '0') m_LevelOverride = 0;
++    }
 +    const char *pos = getenv("BALLANCE_MC_STEVE_POS");
 +    if (pos && *pos) {
 +        float x = 0, y = 0, z = 0;
@@ -1608,6 +3090,9 @@ index 0000000..c295456
 +    CKScene *scene = level ? level->GetCurrentScene() : nullptr;
 +    if (scene) {
 +        scene->AddObject(m_Entity);
++        m_Scene = scene;
++        m_EntityId = m_Entity->GetID();
++        m_AvatarShown = !(m_FirstPerson || m_Hide);
 +    } else {
 +        log_line("no current scene; the avatar will not be drawn");
 +        return false;
@@ -1624,6 +3109,7 @@ index 0000000..c295456
 +            m_Camera->SetFov(1.2217f); // 70 degrees, the Minecraft default
 +            m_Camera->SetFrontPlane(0.5f);
 +            m_Camera->SetBackPlane(20000.0f);
++            m_CameraId = m_Camera->GetID();
 +            if (!m_YawGiven) m_Yaw = 0.0f;
 +        }
 +    }
@@ -1706,7 +3192,8 @@ index 0000000..c295456
 +// (BuildingBlocks/Cameras/Behaviors/CameraMouseOrbit.cpp), so the sign
 +// convention is copied from it: moving the mouse right decreases yaw.
 +bool CMinecraftSteve::WantsRelativeMouse() const {
-+    return m_Enabled && m_FirstPerson && m_Look && m_MouseCapture && !MenuUp();
++    return m_Enabled && m_FirstPerson && m_Look && m_MouseCapture && !MenuUp() &&
++           !m_PanelOpen && m_InLevel;
 +}
 +
 +// Two candidate signals, both read every frame and both logged, because which
@@ -1867,6 +3354,8 @@ index 0000000..c295456
 +
 +void CMinecraftSteve::UpdateLook(CKContext *context) {
 +    if (!m_Look || !context) return;
++    // The panel is the one thing on screen that wants a normal, moving pointer.
++    if (m_PanelOpen) return;
 +    // Nothing to undo while a menu is up: the input manager zeroes its relative
 +    // accumulators every PreProcess, so a delta that is not read here is a delta
 +    // that is gone. The xdotool-driven test in tools/steve/menu_shots.sh checks
@@ -1951,13 +3440,16 @@ index 0000000..c295456
 +        const bool playerBall = !strncmp(name, "I_Ball", 6);
 +        const bool better = !m_Ball || playerBall;
 +        if (better) {
-+            if (m_Ball != entity)
++            if (m_Ball != entity) {
 +                log_line("following \"%s\" (size %.2f x %.2f x %.2f)", name,
 +                         entity->GetBoundingBox(FALSE).GetSize().x,
 +                         entity->GetBoundingBox(FALSE).GetSize().y,
 +                         entity->GetBoundingBox(FALSE).GetSize().z);
++                if (m_Debug)
++                    log_line("ball %s is %s", name, playerBall ? "the player" : "a placeholder");
++            }
 +            m_Ball = entity;
-+            if (m_Debug) log_line("ball %s is %s", name, playerBall ? "the player" : "a placeholder");
++            m_BallId = entity->GetID();
 +        }
 +    }
 +    if (report && !m_Ball) log_line("no runtime ball yet");
@@ -2023,10 +3515,61 @@ index 0000000..c295456
 +    }
 +}
 +
++// The user-facing half of the configuration, read from CMinecraftSettings every
++// frame rather than once: the panel is allowed to change any of it while the game
++// runs, and "the click lands on the next frame" is the whole point of a settings
++// panel. The rest of the environment (position, yaw, level override, ...) stays a
++// startup-only test hook and is still read once by ReadEnvironment().
++void CMinecraftSteve::ApplySettings() {
++    if (!m_Settings) return;
++    const CMinecraftSettings::Values &values = m_Settings->Get();
++    // Panel clicks land mid-run, so say when the model actually reacts: one
++    // line here is the proof that the change reached the thing it changes,
++    // instead of only reaching the ini file.
++    if (m_Enabled != values.steve) log_line("steve %s", values.steve ? "on" : "off");
++    if (m_Hide != values.hideSteve) log_line("steve model %s", values.hideSteve ? "hidden" : "shown");
++    m_Enabled = values.steve;
++    m_FirstPerson = values.firstPerson;
++    m_Hide = values.hideSteve;
++    m_HideBall = values.hideBall;
++    m_Debug = values.debugLog;
++    if (values.sensitivity > 0.0f) m_LookSensitivity = values.sensitivity;
++    // An explicit BALLANCE_MC_STEVE_POS still wins: the harnesses park Steve at a
++    // fixed point and a follow-ball setting must not move him off it.
++    if (!m_UseFixedPosition) m_FollowBall = values.followBall;
++    if (values.scale > 0.0f && fabsf(values.scale - m_Scale) > 1e-4f) {
++        m_Scale = values.scale;
++        m_Height = kModelHeight * m_Scale;
++        m_EyeHeight = kModelEyeHeight * m_Scale;
++        if (m_Entity) {
++            const VxVector scale(m_Scale, m_Scale, m_Scale);
++            m_Entity->SetScale(&scale);
++        }
++    }
++}
++
 +void CMinecraftSteve::Frame(CKContext *context, CKRenderContext *renderContext,
 +                            float deltaSeconds) {
-+    if (!m_Enabled && !ReadEnvironment()) return;
++    if (!m_EnvironmentRead) {
++        m_EnvironmentRead = true;
++        ReadEnvironment();
++    }
++    ApplySettings();
++    if (!m_Enabled) {
++        // Turning Steve off from the panel has to take him off screen, not just
++        // stop moving him: the entity belongs to the scene and would otherwise be
++        // drawn by the game's own 3D pass forever.
++        if (m_Entity && m_AvatarShown) {
++            m_Entity->Show(CKHIDE);
++            m_AvatarShown = false;
++        }
++        return;
++    }
 +    if (m_BuildFailed) return;
++    // The level can be swapped underneath us at any moment (menu -> level 1,
++    // level -> level). Everything below may assume the tracked objects are still
++    // the ones the context knows about.
++    Validate(context);
 +    if (!m_Built) {
 +        if (!Build(context)) {
 +            m_BuildFailed = true;
@@ -2038,26 +3581,110 @@ index 0000000..c295456
 +    }
 +    FindBall(context, deltaSeconds);
 +    UpdateMenuState(context);
-+    UpdateLook(context);
-+    UpdatePlacement(context, deltaSeconds);
-+    if (m_FirstPerson) ApplyFirstPersonCamera(renderContext);
-+    else if (m_HasCamOffset) ApplyOffsetCamera(renderContext);
++    UpdateLevelState(renderContext);
++    if (m_InLevel) {
++        UpdateLook(context);
++        UpdatePlacement(context, deltaSeconds);
++        if (m_FirstPerson) ApplyFirstPersonCamera(renderContext);
++        else if (m_HasCamOffset) ApplyOffsetCamera(renderContext);
++    }
 +    DebugLog(context, deltaSeconds);
++}
++
++// Steve only exists inside a level. The main menu is a rotating camera over a
++// map, and the ball he would follow there (I_Ball_Stone) belongs to that map, not
++// to a player -- so the avatar is hidden and the mouse is left to the menu until
++// the game attaches an in-game camera.
++//
++// The camera name is the signal because it is the only one this port keeps
++// honest: CKContext::IsPlaying() stays TRUE across menus, and the cursor flag is
++// pinned visible (see UpdateMenuState). An unrecognised name counts as "in a
++// level", so a level that names its camera something else keeps working.
++void CMinecraftSteve::UpdateLevelState(CKRenderContext *renderContext) {
++    bool inLevel = true;
++    if (m_LevelOverride >= 0) {
++        inLevel = m_LevelOverride != 0;
++    } else if (renderContext) {
++        CKCamera *camera = renderContext->GetAttachedCamera();
++        const char *name = camera ? camera->GetName() : nullptr;
++        if (name) {
++            if (strstr(name, "InGame")) inLevel = true;
++            else if (strstr(name, "Menu")) inLevel = false;
++        }
++    }
++    if (inLevel != m_InLevel) {
++        m_InLevel = inLevel;
++        log_line("level state: %s", inLevel ? "in a level" : "menu");
++    }
++    if (!m_Entity) return;
++    const bool wantShown = m_InLevel && !(m_FirstPerson || m_Hide);
++    if (wantShown != m_AvatarShown) {
++        m_Entity->Show(wantShown ? CKSHOW : CKHIDE);
++        m_AvatarShown = wantShown;
++    }
++}
++
++// Everything Steve holds a pointer to is re-checked here, once per frame, before
++// it is used. Level loads are the case that matters: the avatar sits in the old
++// level's scene and the ball belongs to the old level, so both are destroyed
++// while the pointers stay behind.
++void CMinecraftSteve::Validate(CKContext *context) {
++    if (!context || !m_Built) return;
++    if (m_Ball && !ObjectStillThere(context, m_Ball, m_BallId)) {
++        m_Ball = nullptr;
++        m_BallId = 0;
++        m_HasLastBallPosition = false;
++        log_line("ball went away with the old level; looking again");
++    }
++    if (m_Camera && !ObjectStillThere(context, m_Camera, m_CameraId)) {
++        m_Camera = nullptr;
++        m_CameraId = 0;
++    }
++    if (m_Entity && !ObjectStillThere(context, m_Entity, m_EntityId)) {
++        m_Entity = nullptr;
++        m_EntityId = 0;
++        m_AvatarShown = false;
++    }
++    if (!m_Entity) {
++        // Rebuild. The mesh, material and texture are Steve's own objects and are
++        // not part of any level, so Shutdown keeps them; only the entity and the
++        // camera have to be made again.
++        log_line("avatar went away with the old level; rebuilding");
++        Shutdown(context);
++        return;
++    }
++    CKLevel *level = context->GetCurrentLevel();
++    CKScene *scene = level ? level->GetCurrentScene() : nullptr;
++    if (scene && scene != m_Scene) {
++        scene->AddObject(m_Entity);
++        m_Scene = scene;
++        log_line("avatar re-added to the level's scene");
++    }
 +}
 +
 +void CMinecraftSteve::Shutdown(CKContext *context) {
 +    if (!context) return;
 +    if (m_Entity) {
-+        CKScene *scene = nullptr;
-+        CKLevel *level = context->GetCurrentLevel();
-+        if (level) scene = level->GetCurrentScene();
-+        if (scene) scene->RemoveObject(m_Entity);
-+        context->DestroyObject(m_Entity);
++        // Only touch it if it is still the object the context knows: after a
++        // level load this pointer is the one thing that must not be followed.
++        if (ObjectStillThere(context, m_Entity, m_EntityId)) {
++            CKScene *scene = nullptr;
++            CKLevel *level = context->GetCurrentLevel();
++            if (level) scene = level->GetCurrentScene();
++            if (scene) scene->RemoveObject(m_Entity);
++            context->DestroyObject(m_Entity);
++        }
 +        m_Entity = nullptr;
++        m_EntityId = 0;
 +    }
++    m_Scene = nullptr;
++    m_Ball = nullptr;
++    m_BallId = 0;
++    m_AvatarShown = false;
 +    if (m_Camera) {
-+        context->DestroyObject(m_Camera);
++        if (ObjectStillThere(context, m_Camera, m_CameraId)) context->DestroyObject(m_Camera);
 +        m_Camera = nullptr;
++        m_CameraId = 0;
 +    }
 +    if (m_Mesh) {
 +        context->DestroyObject(m_Mesh);
@@ -2075,16 +3702,18 @@ index 0000000..c295456
 +}
 diff --git a/src/MinecraftSteve.h b/src/MinecraftSteve.h
 new file mode 100644
-index 0000000..be69da6
+index 0000000..a64e3b2
 --- /dev/null
 +++ b/src/MinecraftSteve.h
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,201 @@
 +#ifndef PLAYER_MINECRAFTSTEVE_H
 +#define PLAYER_MINECRAFTSTEVE_H
 +
 +#include "CKAll.h"
 +
 +#include <map>
++
++class CMinecraftSettings;
 +
 +// Puts Minecraft's Steve *inside* the Ballance world.
 +//
@@ -2118,6 +3747,10 @@ index 0000000..be69da6
 +//                               menu never opens (see tools/steve/menu_shots.sh)
 +//   BALLANCE_MC_STEVE_BODY=0   body keeps the head's yaw instead of the heading
 +//   BALLANCE_MC_STEVE_TURN=f   max body turn rate, degrees per second (default 720)
++//   BALLANCE_MC_STEVE_LEVEL=0/1  force "a menu is up" / "a level is running"
++//                               (default: read the attached camera's name; the
++//                               avatar is hidden and the mouse left alone
++//                               whenever it is not an in-game camera)
 +//   BALLANCE_MC_STEVE_DEBUG=1  once a second, log what it found and where it is
 +class CMinecraftSteve {
 +public:
@@ -2129,6 +3762,16 @@ index 0000000..be69da6
 +    void Shutdown(CKContext *context);
 +
 +    bool Enabled() const { return m_Enabled; }
++
++    // Wired by the player: the user-facing options come from Minecraft.ini with
++    // the environment merged over it, so the settings panel can change them while
++    // the game runs. Without this pointer Steve falls back to the environment
++    // alone, exactly as before the panel existed.
++    void SetSettings(const CMinecraftSettings *settings) { m_Settings = settings; }
++    void ApplySettings();
++
++    // The panel is up: it owns the pointer, so no look, and no capture.
++    void SetPanelOpen(bool open) { m_PanelOpen = open; }
 +
 +    // Why the gate is in here and not in the player: the player only ever
 +    // released the pointer on focus loss. Ballance's own pause menu never
@@ -2151,6 +3794,8 @@ index 0000000..be69da6
 +    void FindBall(CKContext *context, float deltaSeconds);
 +    void UpdateLook(CKContext *context);
 +    void UpdateMenuState(CKContext *context);
++    void UpdateLevelState(CKRenderContext *renderContext);
++    void Validate(CKContext *context);
 +    void UpdateBodyYaw(const VxVector &target, float deltaSeconds);
 +    void ApplyFirstPersonCamera(CKRenderContext *renderContext);
 +    void ApplyOffsetCamera(CKRenderContext *renderContext);
@@ -2235,6 +3880,23 @@ index 0000000..be69da6
 +    CK3dEntity *m_Entity;
 +    CK3dEntity *m_Ball;
 +    CKCamera *m_Camera;
++    // The ids of the three above, kept next to the pointers. Loading a level
++    // destroys the objects the previous one brought in, so after a level swap
++    // the pointers refer to freed memory; comparing them with what the context
++    // answers for the id is the only test that does not dereference them.
++    CK_ID m_EntityId;
++    CK_ID m_BallId;
++    CK_ID m_CameraId;
++    CKScene *m_Scene;
++    // Whether the game currently has an in-game camera attached. In the menu
++    // Steve is hidden and the mouse is left to the menu (see UpdateLevelState).
++    bool m_InLevel;
++    const CMinecraftSettings *m_Settings;
++    bool m_PanelOpen;
++    bool m_EnvironmentRead;
++    // -1 = read the camera, 0/1 = BALLANCE_MC_STEVE_LEVEL forced it.
++    int m_LevelOverride;
++    bool m_AvatarShown;
 +    CKTexture *m_Texture;
 +    CKMaterial *m_Material;
 +

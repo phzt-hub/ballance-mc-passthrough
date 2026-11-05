@@ -30,7 +30,7 @@ shoot() {
     local tag=$1 mode=$2
     rm -rf "$OUT/$tag"; mkdir -p "$OUT/$tag"
     echo "== $tag"
-    env BALLANCE_POC_ISOLATE=1 BALLANCE_MC_STEVE=1 BALLANCE_MC_STEVE_FP=1 BALLANCE_MC_STEVE_YAW=0 BALLANCE_MC_STEVE_SCALE=0.25 BALLANCE_MC_STEVE_POS=$POS BALLANCE_MC_STEVE_DEBUG=1 OUT="$OUT/$tag" RUN_SECONDS=16 FRAMES=$FRAME "$ROOT/tools/poc1/run-poc1.sh" --cmo base.cmo --level "$LEVEL" > "$OUT/$tag.log" 2>&1 &
+    env BALLANCE_POC_ISOLATE=1 BALLANCE_MC_STEVE=1 BALLANCE_MC_STEVE_LEVEL=1 BALLANCE_MC_STEVE_FP=1 BALLANCE_MC_STEVE_YAW=0 BALLANCE_MC_STEVE_SCALE=0.25 BALLANCE_MC_STEVE_POS=$POS BALLANCE_MC_STEVE_DEBUG=1 OUT="$OUT/$tag" RUN_SECONDS=16 FRAMES=$FRAME "$ROOT/tools/poc1/run-poc1.sh" --cmo base.cmo --level "$LEVEL" > "$OUT/$tag.log" 2>&1 &
     local runner=$!
     if [ "$mode" != "none" ]; then
         for _ in $(seq 1 60); do grep -q "mc-steve. built" "$OUT/$tag.log" 2>/dev/null && break; sleep 0.5; done

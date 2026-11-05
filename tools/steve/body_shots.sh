@@ -31,7 +31,7 @@ run_phase() {
     local log="$OUT/$tag.log"
     rm -rf "$OUT/$tag"; mkdir -p "$OUT/$tag"
 
-    env BALLANCE_POC_ISOLATE=1 BALLANCE_MC_STEVE=1 BALLANCE_MC_STEVE_FP=1 BALLANCE_MC_STEVE_YAW=0 \
+    env BALLANCE_POC_ISOLATE=1 BALLANCE_MC_STEVE=1 BALLANCE_MC_STEVE_LEVEL=1 BALLANCE_MC_STEVE_FP=1 BALLANCE_MC_STEVE_YAW=0 \
         BALLANCE_MC_STEVE_SCALE=0.25 BALLANCE_MC_STEVE_DEBUG=1 $extra \
         OUT="$OUT/$tag" RUN_SECONDS="$seconds" FRAMES= \
         "$ROOT/tools/poc1/run-poc1.sh" --cmo base.cmo --level "$LEVEL" > "$log" 2>&1 &

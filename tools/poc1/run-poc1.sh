@@ -26,7 +26,10 @@ export DISPLAY
 
 mkdir -p "$GAME" "$OUT"
 if command -v rsync >/dev/null; then
-    rsync -a --delete "$STAGE/" "$GAME/"
+    # Minecraft.ini is the player's own settings file (written by the in-game
+    # panel); the stage does not carry it, so --delete would wipe it on every
+    # launch and the panel would look like it forgets.
+    rsync -a --delete --exclude=Bin/Minecraft.ini "$STAGE/" "$GAME/"
 else
     rm -rf "$GAME"; mkdir -p "$GAME"; cp -a "$STAGE/." "$GAME/"
 fi
