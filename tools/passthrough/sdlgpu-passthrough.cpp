@@ -11,6 +11,22 @@
 #include "CKSdlGpuRasterizerContext.h"
 #include "mpframe.h"
 
+// The mailbox transport below is POSIX shared memory plus GCC atomic builtins, so
+// the Windows build compiles this translation unit down to a no-op tick. That keeps
+// the symbol the render path calls without dragging <sys/mman.h> into MSVC. Nothing
+// else changes: BALLANCE_MC_PASSTHROUGH stays inert on Windows.
+#if defined(_WIN32)
+
+CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
+                               CKSdlGpuPassthroughState &State) {
+    (void)Context;
+    (void)State;
+    return FALSE;
+}
+
+#else
+
+
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -253,3 +269,5 @@ CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
     log_stats(State);
     return drawn == CK_OK ? TRUE : FALSE;
 }
+
+#endif // _WIN32

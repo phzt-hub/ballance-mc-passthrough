@@ -44,6 +44,7 @@ docs/feasibility.md        PoC-0 的证据与结论（Ballanced / SDL3 路线）
 docs/bmlplus-hooks.md      BML+ 钩子能力核查（路线 A′：BallancePlayer + BML+）
 docs/level-parse.md        离线读关卡几何：已跑通，含三个坑与矩阵约定
 docs/scale-calibration.md  尺度标定表（球 / 物理件 / 13 关走廊宽 / 方块比例）
+docs/windows-build.md      Windows 真机试玩包怎么编（工具链 / 三个坑 / 铺目录）
 tools/nmo_geom.cpp         读 .nmo 导出世界空间 OBJ + JSON（libcmo21）
 tools/build-nmo-geom.sh    建它（钉死编译参数）
 tools/export-levels.sh     13 关 + PH + 资产全量导出
