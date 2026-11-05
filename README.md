@@ -37,6 +37,10 @@
 **离线侧已完成（2026-11-01）**：13 关 472,534 个三角全部可离线导出（`tools/nmo_geom`），
 尺度已标定（1 MC 方块 = 4.0 Ballance 单位 = 1 个球直径），见 [docs/scale-calibration.md](docs/scale-calibration.md)。
 
+**已知问题（2026-11-05）**：穿透开着且 `Hud=1` 时，MC 帧自带的 HUD 与 Ballance 侧手搓的
+准星/快捷栏/心会**叠成两套**。没修 —— 决定是先不动、等 M1/M2 到位后由 MC 帧接管，
+理由与收法见 [docs/mc-hud.md](docs/mc-hud.md)。
+
 ## 目录
 
 ```
