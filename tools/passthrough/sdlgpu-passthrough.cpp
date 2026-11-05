@@ -104,11 +104,19 @@ CKBOOL env_flag(const char *name) {
 // consumer reads after the acquire must come after it in program order.
 uint32_t load_acquire(const uint32_t *field) {
 #if defined(_MSC_VER)
-    // MSVC has no __atomic builtins and the build is C++17, so atomic_ref is not
-    // available either. InterlockedCompareExchange against an unchanged value is
-    // an acquire barrier and an atomic 32-bit load.
-    return (uint32_t)_InterlockedCompareExchange(
-        reinterpret_cast<volatile LONG *>(const_cast<uint32_t *>(field)), 0, 0);
+    // x86-64 is strongly ordered, so an aligned 32-bit load plus a compiler
+    // barrier is a full acquire.
+    //
+    // Do not reach for _InterlockedCompareExchange here. It is a *locked
+    // read-modify-write*, and this view is mapped read-only (CreateFileMapping
+    // PAGE_READONLY -> MapViewOfFile FILE_MAP_READ), so its write half raises an
+    // access violation on the very first tick. That is what killed the 2026-11-05
+    // 14:26:27 run: WER reports CKSdlGpuRasterizer.dll+0x3bcd9, which decodes to
+    // "lock cmpxchg %edi,0x20(%rcx)" right here - the mapping was fine, the read
+    // had been turned into a write.
+    const uint32_t value = *reinterpret_cast<const volatile uint32_t *>(field);
+    _ReadBarrier();
+    return value;
 #else
     return __atomic_load_n(field, __ATOMIC_ACQUIRE);
 #endif

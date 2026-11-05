@@ -8,7 +8,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.io.RandomAccessFile;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
@@ -16,6 +18,7 @@ import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -41,7 +44,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>{@code BALLANCE_MC_SHM}  mailbox name, default {@code ballance_mc_frame};</li>
  *   <li>{@code BALLANCE_MC_MAILBOX} absolute mailbox path, overrides the name;</li>
  *   <li>{@code BALLANCE_MC_FPS}  target publish rate, default 30, 0 = every frame;</li>
- *   <li>{@code BALLANCE_MC_EXPORT} set to {@code 0} to disable the export entirely.</li>
+ *   <li>{@code BALLANCE_MC_EXPORT} set to {@code 0} to disable the export entirely;</li>
+ *   <li>{@code BALLANCE_MC_STAGE}  narrow the pipeline for A/B runs, see {@link #stage};</li>
+ *   <li>{@code BALLANCE_MC_TRACE}  {@code 1} (or a path) to write a flushed breadcrumb
+ *       log, so a native fault still leaves the last completed step behind.</li>
  * </ul>
  */
 public final class McFrameExport {
@@ -89,6 +95,27 @@ public final class McFrameExport {
     private static int failures;
     private static long statsSinceNanos;
 
+    /**
+     * How much of the pipeline to run. Production is {@link #STAGE_FULL}; the other
+     * values exist only so an A/B run can say which half of it the host dislikes:
+     * <ol start="0">
+     *   <li>screenshot readback only -- the image is closed, nothing touches the mailbox;</li>
+     *   <li>mailbox header and frame counters only -- no pixel copy at all;</li>
+     *   <li>full pipeline, pixels copied into the mapping (the production path);</li>
+     *   <li>pixels copied into a plain heap array instead of the mapping.</li>
+     * </ol>
+     */
+    private static final int STAGE_SCREENSHOT = 1;
+    private static final int STAGE_HEADER = 2;
+    private static final int STAGE_FULL = 3;
+    private static final int STAGE_HEAP = 4;
+
+    private static int stage = STAGE_FULL;
+
+    private static PrintStream traceStream;
+    private static int traceBudget = 400;
+    private static int[] heapScratch;
+
     private McFrameExport() {
     }
 
@@ -105,6 +132,8 @@ public final class McFrameExport {
             name = "ballance_mc_frame";
         }
         mailboxPath = resolveMailboxPath(name);
+        stage = readInt(System.getenv("BALLANCE_MC_STAGE"), STAGE_FULL);
+        openTrace();
         int fps = 30;
         String fpsValue = System.getenv("BALLANCE_MC_FPS");
         if (fpsValue != null && !fpsValue.isEmpty()) {
@@ -116,8 +145,65 @@ public final class McFrameExport {
         }
         minIntervalNanos = fps > 0 ? 1_000_000_000L / fps : 0L;
         statsSinceNanos = System.nanoTime();
-        LOGGER.info("frame export {} (mailbox {}, target {} fps)", enabled ? "enabled" : "disabled",
-                mailboxPath, fps > 0 ? fps : "every");
+        LOGGER.info("frame export {} (mailbox {}, target {} fps, stage {})", enabled ? "enabled" : "disabled",
+                mailboxPath, fps > 0 ? fps : "every", stage);
+        trace("initialise enabled=" + enabled + " stage=" + stage + " mailbox=" + mailboxPath);
+    }
+
+    private static int readInt(String text, int fallback) {
+        if (text == null || text.isEmpty()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    /**
+     * Opens the breadcrumb log. {@code BALLANCE_MC_TRACE=1} writes next to the mailbox
+     * ({@code ballance_mc_frame-trace.log}); any other value is taken as the file name.
+     * Every line is flushed, because the point of the file is to survive a hard fault.
+     */
+    private static void openTrace() {
+        String value = System.getenv("BALLANCE_MC_TRACE");
+        if (value == null || value.isEmpty() || value.equals("0")) {
+            return;
+        }
+        String path = value.equals("1")
+                ? mailboxPath.replaceAll("\\.dat$", "") + "-trace.log"
+                : value;
+        try {
+            File file = new File(path);
+            File parent = file.getParentFile();
+            if (parent != null) {
+                parent.mkdirs();
+            }
+            traceStream = new PrintStream(new FileOutputStream(file, false), true, StandardCharsets.UTF_8);
+        } catch (Throwable throwable) {
+            traceStream = null;
+            LOGGER.warn("cannot open trace file {}", path, throwable);
+        }
+    }
+
+    /** Thread and stack depth, so a native fault can be told apart from deep recursion. */
+    private static String where() {
+        if (traceStream == null) {
+            return "";
+        }
+        return " thread=" + Thread.currentThread().getName()
+                + " depth=" + new Throwable().getStackTrace().length;
+    }
+
+    private static void trace(String message) {
+        PrintStream out = traceStream;
+        if (out == null || traceBudget <= 0) {
+            return;
+        }
+        --traceBudget;
+        out.println((System.nanoTime() / 1_000_000L) + " " + message);
+        out.flush();
     }
 
     /**
@@ -179,8 +265,10 @@ public final class McFrameExport {
             IN_FLIGHT.set(false);
             return;
         }
+        trace("request " + target.width + "x" + target.height + where());
         try {
             Screenshot.takeScreenshot(target, 1, McFrameExport::publish);
+            trace("request handed to Screenshot");
         } catch (Throwable throwable) {
             IN_FLIGHT.set(false);
             noteFailure(throwable);
@@ -188,39 +276,89 @@ public final class McFrameExport {
     }
 
     private static void publish(NativeImage image) {
+        trace("publish enter" + where());
         try (NativeImage frame = image) {
             int frameWidth = frame.getWidth();
             int frameHeight = frame.getHeight();
+            trace("publish image " + frameWidth + "x" + frameHeight);
             if (frameWidth < 8 || frameHeight < 8) {
                 return;
             }
+            if (stage == STAGE_SCREENSHOT) {
+                ++published;
+                logStats();
+                trace("publish stage1 done");
+                return;
+            }
             if (!ensureMailbox(frameWidth, frameHeight)) {
+                trace("publish no mailbox");
+                return;
+            }
+            int slot = nextSlot;
+            nextSlot = (nextSlot + 1) % SLOTS;
+            int stride = frameWidth * 4;
+            int target = (HEADER_BYTES + slot * stride * frameHeight) / 4;
+            int count = frameWidth * frameHeight;
+            if (stage == STAGE_HEADER) {
+                VarHandle.storeStoreFence();
+                map.putInt(OFF_PUBLISHED_SLOT, slot);
+                VarHandle.storeStoreFence();
+                map.putInt(OFF_FRAME_ID, ++frameId);
+                ++published;
+                logStats();
+                trace("publish stage2 done slot=" + slot);
                 return;
             }
             ByteBuffer source = frame.getPixelBytes().order(ByteOrder.LITTLE_ENDIAN);
             IntBuffer pixels = source.asIntBuffer();
-            int stride = frameWidth * 4;
-            int slot = nextSlot;
-            nextSlot = (nextSlot + 1) % SLOTS;
-            int target = (HEADER_BYTES + slot * stride * frameHeight) / 4;
-            int count = frameWidth * frameHeight;
-            // NativeImage memory is R,G,B,A; the mailbox wants B,G,R,A. Both views are
-            // little endian so one integer holds A<<24 | B<<16 | G<<8 | R and the swap is
-            // a pair of shifts on the red and blue bytes.
-            for (int i = 0; i < count; i++) {
-                int argb = pixels.get(i);
-                mapInts.put(target + i, (argb & 0xFF00FF00) | ((argb & 0xFF) << 16) | ((argb >>> 16) & 0xFF));
+            trace("publish bytes cap=" + source.capacity() + " pixels=" + pixels.capacity() + " direct="
+                    + source.isDirect());
+            if (stage == STAGE_HEAP) {
+                if (heapScratch == null || heapScratch.length != count) {
+                    heapScratch = new int[count];
+                }
+                copy(pixels, heapScratch, 0, count, null);
+                trace("publish stage4 heap copy done");
+            } else {
+                // NativeImage memory is R,G,B,A; the mailbox wants B,G,R,A. Both views are
+                // little endian so one integer holds A<<24 | B<<16 | G<<8 | R and the swap is
+                // a pair of shifts on the red and blue bytes.
+                copy(pixels, null, target, count, mapInts);
             }
             VarHandle.storeStoreFence();
+            trace("publish fence");
             map.putInt(OFF_PUBLISHED_SLOT, slot);
             VarHandle.storeStoreFence();
             map.putInt(OFF_FRAME_ID, ++frameId);
             ++published;
+            trace("publish done slot=" + slot + " frameId=" + frameId);
             logStats();
         } catch (Throwable throwable) {
             noteFailure(throwable);
         } finally {
+            trace("publish exit");
             IN_FLIGHT.set(false);
+        }
+    }
+
+    /**
+     * Swaps red and blue while copying, in quarter-sized chunks so the breadcrumb log can
+     * say how far a run got before the host died.
+     */
+    private static void copy(IntBuffer source, int[] heap, int mailboxBase, int count, IntBuffer mailbox) {
+        int quarter = Math.max(1, count / 4);
+        for (int base = 0; base < count; base += quarter) {
+            int end = Math.min(count, base + quarter);
+            for (int i = base; i < end; i++) {
+                int argb = source.get(i);
+                int bgra = (argb & 0xFF00FF00) | ((argb & 0xFF) << 16) | ((argb >>> 16) & 0xFF);
+                if (mailbox != null) {
+                    mailbox.put(mailboxBase + i, bgra);
+                } else {
+                    heap[i] = bgra;
+                }
+            }
+            trace("copied " + end + "/" + count);
         }
     }
 
@@ -254,6 +392,7 @@ public final class McFrameExport {
                 map = mapped;
                 mapInts = mapped.asIntBuffer();
             }
+            trace("mapped " + total + " bytes, ints=" + mapInts.capacity());
             map.putInt(OFF_MAGIC, MAGIC);
             map.putInt(OFF_VERSION, VERSION);
             map.putInt(OFF_WIDTH, frameWidth);
@@ -274,6 +413,7 @@ public final class McFrameExport {
             height = frameHeight;
             frameId = 0;
             nextSlot = 0;
+            trace("header written");
             LOGGER.info("mailbox {} ready, {}x{} BGRA8, {} slots, {} bytes", mailboxPath, frameWidth,
                     frameHeight, SLOTS, total);
             return true;
@@ -300,6 +440,7 @@ public final class McFrameExport {
     private static void noteFailure(Throwable throwable) {
         if (++failures <= 3) {
             LOGGER.warn("frame export failed", throwable);
+            trace("failure " + throwable);
         }
     }
 }
