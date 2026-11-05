@@ -4,6 +4,16 @@ M0/M0b 的方向是反的：那套把 Minecraft 整帧贴到 Ballance 窗口上�
 **世界** 是 Minecraft 的。这条路留着不动（`tools/passthrough/`），但真正的目标
 是反过来：**Ballance 是那个世界，Steve 站进去。**
 
+## 2026-11-05 起：身体默认不画
+
+面板与 ini 的默认值改成 **Steve=0 / FirstPerson=1 / Hud=1 / HudScale=1**。
+`CMinecraftSteve` 内部把「身体」和「驾驶舱」拆开了：`m_DrawBody` 只由 `Steve` 决定，
+模块本身的启用条件是 `steve || firstPerson`。所以默认状态下相机照样挂在球上、
+相对鼠标照样工作、HUD 的第一人称手臂照样画，**画面里没有任何方块人**。
+想看模型随时在 F1 面板把 `Steve` 打开（`BALLANCE_MC_STEVE=1`）。
+
+HUD 本身见 [`docs/mc-hud.md`](mc-hud.md)。
+
 ## 做法
 
 `Source/Player/src/MinecraftSteve.cpp`（补丁见 `tools/ballanced-patches/Player.patch`）：

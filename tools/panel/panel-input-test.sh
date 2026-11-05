@@ -100,6 +100,10 @@ def rects():
     )
 
 
+def ini_text():
+    return open(INI, encoding="utf-8", errors="replace").read() if os.path.exists(INI) else ""
+
+
 def centre(rect):
     return ((rect[0] + rect[2]) * 0.5, (rect[1] + rect[3]) * 0.5)
 
@@ -162,6 +166,14 @@ click(origin, *centre(rows[4][2]), "row 4 (HideBall) -> on")
 click(origin, *centre(boxes[5]["plus"]), "row 5 (Scale) plus")
 click(origin, *centre(boxes[5]["minus"]), "row 5 (Scale) minus")
 click(origin, panel[0] + 3, (rows[1][2][1] + rows[1][2][3]) * 0.5, "panel edge, expected miss")
+click(origin, *centre(rows[8][2]), "row 8 (Hud) -> off")
+print("   ini now: %s" % (re.search(r"^Hud=.*$", ini_text(), re.M).group(0)
+                         if re.search(r"^Hud=.*$", ini_text(), re.M) else "<no Hud key>"))
+click(origin, *centre(rows[8][2]), "row 8 (Hud) -> on")
+click(origin, *centre(boxes[9]["plus"]), "row 9 (HudScale) plus")
+print("   ini now: %s" % (re.search(r"^HudScale=.*$", ini_text(), re.M).group(0)
+                         if re.search(r"^HudScale=.*$", ini_text(), re.M) else "<no HudScale key>"))
+click(origin, *centre(boxes[9]["minus"]), "row 9 (HudScale) minus")
 click(origin, *centre(reset), "Restore defaults")
 
 print("== keyboard ==")

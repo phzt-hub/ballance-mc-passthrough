@@ -1,23 +1,25 @@
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index e051c92..1cbf95c 100644
+index e051c92..ba6d25b 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -39,6 +39,10 @@ endif ()
+@@ -39,6 +39,11 @@ endif ()
  set(PLAYER_HEADERS
          StaticPlugins.h
          GamePlayer.h
 +        MinecraftOverlay.h
++        MinecraftHud.h
 +        MinecraftSettings.h
 +        MinecraftFontAtlas.h
 +        MinecraftSteve.h
          GameConfig.h
          PlayerOptions.h
          PlayerSdlShortcuts.h
-@@ -52,6 +56,9 @@ set(PLAYER_HEADERS
+@@ -52,6 +57,10 @@ set(PLAYER_HEADERS
  set(PLAYER_SOURCES
          Player.cpp
          GamePlayer.cpp
 +        MinecraftOverlay.cpp
++        MinecraftHud.cpp
 +        MinecraftSettings.cpp
 +        MinecraftSteve.cpp
          GameConfig.cpp
@@ -36,10 +38,10 @@ index 347ca16..4bc5d2e 100644
  
  #define GAMECONFIG_PATH_FIELDS \
 diff --git a/src/GamePlayer.cpp b/src/GamePlayer.cpp
-index 4ffa776..90849a0 100644
+index 4ffa776..aabadba 100644
 --- a/src/GamePlayer.cpp
 +++ b/src/GamePlayer.cpp
-@@ -288,6 +288,16 @@ bool CGamePlayer::Init(const CGameConfig &runtimeConfig, const CGameConfig &pers
+@@ -288,6 +288,18 @@ bool CGamePlayer::Init(const CGameConfig &runtimeConfig, const CGameConfig &pers
          SDL_RaiseWindow(m_SdlWindow);
      }
  
@@ -52,11 +54,13 @@ index 4ffa776..90849a0 100644
 +                             m_MinecraftSettings.GetPath());
 +    m_MinecraftPanel.SetSettings(&m_MinecraftSettings);
 +    m_Steve.SetSettings(&m_MinecraftSettings);
++    m_MinecraftHud.SetSettings(&m_MinecraftSettings);
++    m_MinecraftHud.SetSteve(&m_Steve);
 +
      m_State = eReady;
      return true;
  }
-@@ -382,6 +392,978 @@ bool CGamePlayer::Load(const char *filename)
+@@ -382,6 +394,978 @@ bool CGamePlayer::Load(const char *filename)
      return FinishLoad(filename, resolvedFile.CStr());
  }
  
@@ -1035,7 +1039,7 @@ index 4ffa776..90849a0 100644
  void CGamePlayer::Run()
  {
      while (Update())
-@@ -469,8 +1451,56 @@ void CGamePlayer::Process()
+@@ -469,8 +1453,60 @@ void CGamePlayer::Process()
      m_CKContext->Process();
  }
  
@@ -1084,6 +1088,10 @@ index 4ffa776..90849a0 100644
 +        lastTicks = nowTicks;
 +        // The panel goes first: it owns the F1 key and the clicks, and whatever it
 +        // changes in the settings is picked up by Steve in the same frame.
++        // The HUD goes first so its post-sprite callback is installed before the
++        // panel's: callbacks run in registration order, and the panel's dimmed
++        // backdrop has to land on top of the hotbar, not under it.
++        m_MinecraftHud.Frame(m_CKContext, m_RenderContext, elapsed);
 +        m_MinecraftPanel.Frame(m_CKContext, m_RenderContext, elapsed);
 +        m_Steve.SetPanelOpen(m_MinecraftPanel.IsOpen());
 +        m_Steve.Frame(m_CKContext, m_RenderContext, elapsed);
@@ -1092,17 +1100,18 @@ index 4ffa776..90849a0 100644
      m_RenderContext->Render();
  }
  
-@@ -485,6 +1515,9 @@ void CGamePlayer::Shutdown()
+@@ -485,6 +1521,10 @@ void CGamePlayer::Shutdown()
          m_GameInfo = NULL;
      }
  
 +    m_MinecraftPanel.Shutdown(m_CKContext);
++    m_MinecraftHud.Shutdown(m_CKContext);
 +    m_Steve.Shutdown(m_CKContext);
 +
      ShutdownEngine();
      ShutdownWindow();
  
-@@ -1542,6 +2575,7 @@ void CGamePlayer::OnActivateApp(bool active)
+@@ -1542,6 +2582,7 @@ void CGamePlayer::OnActivateApp(bool active)
                  m_InputManager->Pause(TRUE);
  
              ReleaseCursorClip();
@@ -1111,20 +1120,21 @@ index 4ffa776..90849a0 100644
              if (IsRenderFullscreen())
              {
 diff --git a/src/GamePlayer.h b/src/GamePlayer.h
-index 3b54c38..95c45f6 100644
+index 3b54c38..156e377 100644
 --- a/src/GamePlayer.h
 +++ b/src/GamePlayer.h
-@@ -4,6 +4,9 @@
+@@ -4,6 +4,10 @@
  #include "CKAll.h"
  
  #include "GameConfig.h"
++#include "MinecraftHud.h"
 +#include "MinecraftOverlay.h"
 +#include "MinecraftSettings.h"
 +#include "MinecraftSteve.h"
  
  struct SDL_Window;
  
-@@ -19,6 +22,7 @@ public:
+@@ -19,6 +23,7 @@ public:
  
      bool Init(const CGameConfig &config);
      bool Init(const CGameConfig &runtimeConfig, const CGameConfig &persistentConfig);
@@ -1132,7 +1142,7 @@ index 3b54c38..95c45f6 100644
      bool Load(const char *filename = NULL);
  
      void Run();
-@@ -135,6 +139,17 @@ private:
+@@ -135,6 +140,20 @@ private:
      bool m_AltF4ShortcutDown;
      CGameConfig m_Config;
      CGameConfig m_PersistentConfig;
@@ -1147,6 +1157,9 @@ index 3b54c38..95c45f6 100644
 +    // on the frame it lands.
 +    CMinecraftSettings m_MinecraftSettings;
 +    CMinecraftOverlay m_MinecraftPanel;
++    // The HUD draws over the frame and never takes input; it is registered before
++    // the panel so the panel's backdrop covers it.
++    CMinecraftHud m_MinecraftHud;
  };
  
  #endif /* PLAYER_GAMEPLAYER_H */
@@ -1306,6 +1319,994 @@ index 0000000..ab08c82
 +} // namespace mc_font
 +
 +#endif
+diff --git a/src/MinecraftHud.cpp b/src/MinecraftHud.cpp
+new file mode 100644
+index 0000000..f365f7e
+--- /dev/null
++++ b/src/MinecraftHud.cpp
+@@ -0,0 +1,865 @@
++#include "MinecraftHud.h"
++
++#include "MinecraftFontAtlas.h"
++#include "MinecraftSettings.h"
++#include "MinecraftSteve.h"
++
++#include <math.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
++namespace {
++
++void log_line(const char *fmt, ...)
++{
++    char buffer[512];
++    va_list args;
++    va_start(args, fmt);
++    vsnprintf(buffer, sizeof(buffer), fmt, args);
++    va_end(args);
++    fprintf(stderr, "[mc-hud] %s\n", buffer);
++    fflush(stderr);
++}
++
++CKDWORD rgba(unsigned r, unsigned g, unsigned b, unsigned a)
++{
++    return VxColor((float)r / 255.0f, (float)g / 255.0f, (float)b / 255.0f,
++                   (float)a / 255.0f)
++        .GetRGBA();
++}
++
++// Minecraft's palette, kept in one place so the five elements look like they came
++// from the same texture file.
++CKDWORD colour_crosshair() { static const CKDWORD v = rgba(255, 255, 255, 235); return v; }
++CKDWORD colour_crosshair_shadow() { static const CKDWORD v = rgba(0, 0, 0, 90); return v; }
++CKDWORD colour_hotbar_frame() { static const CKDWORD v = rgba(139, 139, 139, 150); return v; }
++CKDWORD colour_hotbar_slot() { static const CKDWORD v = rgba(24, 24, 24, 235); return v; }
++CKDWORD colour_hotbar_rim() { static const CKDWORD v = rgba(200, 200, 200, 60); return v; }
++CKDWORD colour_hotbar_selected() { static const CKDWORD v = rgba(255, 255, 255, 230); return v; }
++CKDWORD colour_heart() { static const CKDWORD v = rgba(220, 32, 32, 255); return v; }
++CKDWORD colour_heart_empty() { static const CKDWORD v = rgba(70, 20, 20, 255); return v; }
++CKDWORD colour_xp_back() { static const CKDWORD v = rgba(12, 12, 12, 200); return v; }
++CKDWORD colour_xp_fill() { static const CKDWORD v = rgba(128, 255, 32, 255); return v; }
++CKDWORD colour_xp_text() { static const CKDWORD v = rgba(128, 255, 32, 255); return v; }
++CKDWORD colour_sleeve() { static const CKDWORD v = rgba(0, 175, 175, 255); return v; }
++CKDWORD colour_sleeve_dark() { static const CKDWORD v = rgba(0, 132, 132, 255); return v; }
++CKDWORD colour_skin() { static const CKDWORD v = rgba(198, 141, 107, 255); return v; }
++CKDWORD colour_skin_dark() { static const CKDWORD v = rgba(160, 105, 78, 255); return v; }
++CKDWORD colour_dirt() { static const CKDWORD v = rgba(139, 90, 43, 255); return v; }
++CKDWORD colour_dirt_top() { static const CKDWORD v = rgba(163, 114, 74, 255); return v; }
++
++// The atlas is base64 so the header stays text; see MinecraftOverlay.cpp for why.
++int decode_base64(const char *text, unsigned char *out, int capacity)
++{
++    static const char kAlphabet[] =
++        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    int table[256];
++    for (int i = 0; i < 256; ++i) table[i] = -1;
++    for (int i = 0; i < 64; ++i) table[(unsigned char)kAlphabet[i]] = i;
++    int written = 0;
++    unsigned int accumulator = 0;
++    int bits = 0;
++    for (const char *p = text; *p; ++p)
++    {
++        const int value = table[(unsigned char)*p];
++        if (value < 0) continue;
++        accumulator = (accumulator << 6) | (unsigned int)value;
++        bits += 6;
++        if (bits >= 8)
++        {
++            bits -= 8;
++            if (written >= capacity) return written;
++            out[written++] = (unsigned char)((accumulator >> bits) & 0xFF);
++        }
++    }
++    return written;
++}
++
++constexpr int kAtlasWidth = 128;
++constexpr int kAtlasHeight = 128;
++
++void draw_glyph(CKRenderContext *device, float left, float top, float right, float bottom,
++                float u0, float v0, float u1, float v1, CKDWORD color)
++{
++    VxDrawPrimitiveData *data = device->GetDrawPrimitiveStructure(CKRST_DP_CL_VCT, 4);
++    if (!data) return;
++#if CKVERSION == 0x13022002 || CKVERSION == 0x05082002
++    VxVector4 *positions = (VxVector4 *)data->PositionPtr;
++    const unsigned int positionStride = data->PositionStride;
++    CKDWORD *colors = (CKDWORD *)data->ColorPtr;
++    VxUV *uvs = (VxUV *)data->TexCoordPtr;
++    const unsigned int uvStride = data->TexCoordStride;
++    VxFillStructure(4, colors, data->ColorStride, 4, &color);
++#else
++    VxVector4 *positions = (VxVector4 *)data->Positions.Ptr;
++    const unsigned int positionStride = data->Positions.Stride;
++    CKDWORD *colors = (CKDWORD *)data->Colors.Ptr;
++    VxUV *uvs = (VxUV *)data->TexCoord.Ptr;
++    const unsigned int uvStride = data->TexCoord.Stride;
++    VxFillStructure(4, colors, data->Colors.Stride, 4, &color);
++#endif
++
++    const float xs[4] = {left, right, right, left};
++    const float ys[4] = {top, top, bottom, bottom};
++    const float us[4] = {u0, u1, u1, u0};
++    const float vs[4] = {v0, v0, v1, v1};
++    for (int i = 0; i < 4; ++i)
++    {
++        positions->x = xs[i];
++        positions->y = ys[i];
++        positions->z = 0.0f;
++        positions->w = 1.0f;
++        positions = (VxVector4 *)((CKBYTE *)positions + positionStride);
++        uvs->u = us[i];
++        uvs->v = vs[i];
++        uvs = (VxUV *)((CKBYTE *)uvs + uvStride);
++    }
++    device->DrawPrimitive(VX_TRIANGLEFAN, NULL, 4, data);
++}
++
++// The heart, as pixels: 8x7, symmetric, the classic Minecraft silhouette. Drawn
++// one rectangle per lit pixel, all of them in a single draw call -- ten hearts are
++// 560 pixels, and 560 separate primitives per frame is not free.
++const char *const kHeartShape[7] = {
++    ".XX..XX.",
++    "XXXXXXXX",
++    "XXXXXXXX",
++    "XXXXXXXX",
++    ".XXXXXX.",
++    "..XXXX..",
++    "...XX...",
++};
++constexpr int kHeartShapeWidth = 8;
++constexpr int kHeartShapeHeight = 7;
++
++constexpr int kHotbarSlots = 9;
++constexpr int kHearts = 10;
++constexpr int kMaxBatchRects = 1024;
++
++struct BatchRect
++{
++    float left, top, right, bottom;
++};
++
++bool env_flag(const char *name)
++{
++    const char *value = getenv(name);
++    if (!value || !*value) return false;
++    return strcmp(value, "0") != 0 && strcmp(value, "off") != 0 && strcmp(value, "false") != 0;
++}
++
++} // namespace
++
++CMinecraftHud::CMinecraftHud()
++    : m_Settings(nullptr), m_Steve(nullptr), m_FontTexture(nullptr), m_Material(nullptr),
++      m_ResourcesReady(false), m_ResourcesFailed(false), m_CallbackInstalled(false),
++      m_EnvironmentRead(false), m_HudOn(true), m_InLevel(true), m_LoggedState(false),
++      m_HudScale(1.0f), m_LevelOverride(-1), m_Energy(nullptr), m_EnergyId(0),
++      m_PointsColumn(-1), m_LivesColumn(-1), m_StartLivesColumn(-1), m_Points(0),
++      m_Lives(kHearts), m_HasGameplay(false),
++      m_Elapsed(0.0f), m_Unit(1.0f), m_HotbarLeft(0.0f), m_HotbarTop(0.0f),
++      m_SelectedSlot(0), m_LoggedGameplay(false) {}
++
++CMinecraftHud::~CMinecraftHud() {}
++
++void CMinecraftHud::ReadEnvironment()
++{
++    // The harnesses need to say "there is a level" without an in-game camera, and
++    // they need to freeze the selection so two screenshots can be compared.
++    m_LevelOverride = -1;
++    if (const char *level = getenv("BALLANCE_MC_HUD_LEVEL"))
++    {
++        if (*level == '1') m_LevelOverride = 1;
++        else if (*level == '0') m_LevelOverride = 0;
++    }
++    if (const char *slot = getenv("BALLANCE_MC_HUD_SLOT"))
++    {
++        const int value = atoi(slot);
++        if (value >= 0 && value < kHotbarSlots) m_SelectedSlot = value;
++    }
++}
++
++bool CMinecraftHud::EnsureResources(CKContext *context, CKRenderContext *renderContext)
++{
++    if (m_ResourcesFailed) return false;
++    if (m_ResourcesReady)
++    {
++        if (!m_CallbackInstalled && renderContext)
++        {
++            renderContext->AddPostSpriteRenderCallBack(&CMinecraftHud::RenderCallback, this,
++                                                       FALSE);
++            m_CallbackInstalled = true;
++        }
++        return true;
++    }
++    if (!context) return false;
++
++    m_FontTexture = (CKTexture *)context->CreateObject(CKCID_TEXTURE, "MinecraftHudFont");
++    if (!m_FontTexture)
++    {
++        log_line("CreateObject(CKCID_TEXTURE) failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    m_FontTexture->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    if (!m_FontTexture->CreateImage(kAtlasWidth, kAtlasHeight, 32))
++    {
++        log_line("CreateImage failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    CKBYTE *pixels = m_FontTexture->LockSurfacePtr(0);
++    if (!pixels)
++    {
++        log_line("LockSurfacePtr failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    memset(pixels, 0, (size_t)kAtlasWidth * kAtlasHeight * 4u);
++    static unsigned char coverage[128 * 96];
++    const int decoded = decode_base64(mc_font::kAtlasBase64, coverage, (int)sizeof(coverage));
++    const int coverageWidth = mc_font::kCellWidth * mc_font::kColumns;
++    const int coverageHeight = mc_font::kCellHeight * mc_font::kRows;
++    for (int y = 0; y < coverageHeight && y < kAtlasHeight; ++y)
++    {
++        for (int x = 0; x < coverageWidth && x < kAtlasWidth; ++x)
++        {
++            const int source = y * coverageWidth + x;
++            if (source >= decoded) continue;
++            const unsigned char alpha = coverage[source];
++            if (!alpha) continue;
++            CKBYTE *p = pixels + ((size_t)y * kAtlasWidth + (size_t)x) * 4u;
++            p[0] = 255;
++            p[1] = 255;
++            p[2] = 255;
++            p[3] = alpha;
++        }
++    }
++    m_FontTexture->ReleaseSurfacePtr(0);
++    m_FontTexture->SetUserMipMapMode(FALSE);
++    m_FontTexture->FreeVideoMemory();
++
++    m_Material = (CKMaterial *)context->CreateObject(CKCID_MATERIAL, "MinecraftHudMaterial");
++    if (!m_Material)
++    {
++        log_line("CreateObject(CKCID_MATERIAL) failed");
++        m_ResourcesFailed = true;
++        return false;
++    }
++    m_Material->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    m_Material->SetTexture(0, m_FontTexture);
++    m_Material->SetTwoSided(TRUE);
++    m_Material->SetDiffuse(VxColor(1.0f, 1.0f, 1.0f, 1.0f));
++    m_Material->SetSpecular(VxColor(0.0f, 0.0f, 0.0f, 1.0f));
++
++    m_ResourcesReady = true;
++    if (renderContext && !m_CallbackInstalled)
++    {
++        renderContext->AddPostSpriteRenderCallBack(&CMinecraftHud::RenderCallback, this, FALSE);
++        m_CallbackInstalled = true;
++    }
++    log_line("font atlas: %d bytes decoded, %dx%d texture", decoded, kAtlasWidth, kAtlasHeight);
++    return true;
++}
++
++void CMinecraftHud::Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds)
++{
++    if (!m_EnvironmentRead)
++    {
++        m_EnvironmentRead = true;
++        ReadEnvironment();
++    }
++    m_Elapsed += deltaSeconds > 0.0f ? deltaSeconds : 0.0f;
++
++    if (m_Settings)
++    {
++        const CMinecraftSettings::Values &values = m_Settings->Get();
++        if (m_HudOn != values.hud) log_line("hud %s", values.hud ? "on" : "off");
++        m_HudOn = values.hud;
++        if (values.hudScale > 0.0f) m_HudScale = values.hudScale;
++    }
++    if (!context) return;
++
++    // The callback is installed even while the HUD is off, so turning it back on
++    // from the panel draws on the same frame rather than needing a restart.
++    EnsureResources(context, renderContext);
++    UpdateLevelState(renderContext);
++    if (m_HudOn && m_InLevel)
++    {
++        ReadGameplay(context);
++        UpdateSelection(context);
++    }
++}
++
++void CMinecraftHud::UpdateLevelState(CKRenderContext *renderContext)
++{
++    bool inLevel = true;
++    if (m_LevelOverride >= 0)
++    {
++        inLevel = m_LevelOverride != 0;
++    }
++    else if (renderContext)
++    {
++        // Same signal Steve uses, for the same reason: the port keeps
++        // CKContext::IsPlaying() TRUE across menus, so the attached camera's name
++        // is the honest one.
++        CKCamera *camera = renderContext->GetAttachedCamera();
++        const char *name = camera ? camera->GetName() : nullptr;
++        if (name)
++        {
++            if (strstr(name, "InGame")) inLevel = true;
++            else if (strstr(name, "Menu")) inLevel = false;
++        }
++    }
++    if (inLevel != m_InLevel)
++    {
++        m_InLevel = inLevel;
++        log_line("level state: %s", inLevel ? "in a level" : "menu");
++    }
++}
++
++void CMinecraftHud::ReadGameplay(CKContext *context)
++{
++    // Menu and level share one context, and a level change destroys the array, so
++    // the pointer is re-checked every frame instead of held.
++    if (m_Energy && context->GetObject(m_EnergyId) != m_Energy)
++    {
++        m_Energy = nullptr;
++        m_EnergyId = 0;
++        m_PointsColumn = -1;
++        m_LivesColumn = -1;
++        m_StartLivesColumn = -1;
++    }
++    if (!m_Energy)
++    {
++        CKObject *found = context->GetObjectByNameAndClass("Energy", CKCID_DATAARRAY);
++        if (found)
++        {
++            m_Energy = (CKDataArray *)found;
++            m_EnergyId = found->GetID();
++            const int columns = m_Energy->GetColumnCount();
++            char names[256];
++            names[0] = '\0';
++            size_t pointsLength = (size_t)-1;
++            size_t livesLength = (size_t)-1;
++            for (int c = 0; c < columns; ++c)
++            {
++                const char *name = m_Energy->GetColumnName(c);
++                if (!name) continue;
++                // The column names are whatever the level ships with, so match
++                // without regard to case and print them: two runs of "which
++                // column is the life count" are worth less than one line of log.
++                // Level 1 ships "Points, Lifes, StartPoints, StartLifes,
++                // Timefactor, LifeBonus": the life column is misspelt "Lifes"
++                // and "LifeBonus" also begins with "life", so match on the
++                // prefix and keep the shortest candidate -- "Lifes" (5) wins
++                // over "LifeBonus" (9), and the per-run "Start*" columns lose.
++                const size_t length = strlen(name);
++                if (!strncasecmp(name, "point", 5) && length < pointsLength)
++                {
++                    m_PointsColumn = c;
++                    pointsLength = length;
++                }
++                else if (!strncasecmp(name, "startlife", 9)) m_StartLivesColumn = c;
++                else if (!strncasecmp(name, "life", 4) && length < livesLength)
++                {
++                    m_LivesColumn = c;
++                    livesLength = length;
++                }
++                if (c > 0) strncat(names, ", ", sizeof(names) - strlen(names) - 1u);
++                strncat(names, name, sizeof(names) - strlen(names) - 1u);
++            }
++            char values[256];
++            values[0] = '\0';
++            for (int c = 0; c < columns; ++c)
++            {
++                int value = -1;
++                m_Energy->GetElementValue(0, c, &value);
++                char one[32];
++                snprintf(one, sizeof(one), "%s%d", c ? "," : "", value);
++                strncat(values, one, sizeof(values) - strlen(values) - 1u);
++            }
++            log_line("energy array: %d columns [%s] = [%s], Points=%d Lives=%d", columns, names,
++                     values, m_PointsColumn, m_LivesColumn);
++        }
++    }
++
++    m_HasGameplay = false;
++    if (m_Energy && m_PointsColumn >= 0 && m_LivesColumn >= 0 && m_Energy->GetRowCount() > 0)
++    {
++        int points = 0;
++        int lives = 0;
++        if (m_Energy->GetElementValue(0, m_PointsColumn, &points) &&
++            m_Energy->GetElementValue(0, m_LivesColumn, &lives))
++        {
++            // A level booted straight into (no new-game setup) leaves the counter
++            // at the pristine zero while StartLifes still says what the level
++            // hands out, and a run that really had no lives left would have ended
++            // the level already. So zero falls back to the start value; anything
++            // above zero is the player's own count and is used as it is.
++            if (lives <= 0 && m_StartLivesColumn >= 0)
++            {
++                int startLives = 0;
++                if (m_Energy->GetElementValue(0, m_StartLivesColumn, &startLives) && startLives > 0)
++                {
++                    lives = startLives;
++                }
++            }
++            m_HasGameplay = true;
++            if (points != m_Points || lives != m_Lives)
++            {
++                m_Points = points;
++                m_Lives = lives;
++                if (!m_LoggedGameplay)
++                {
++                    m_LoggedGameplay = true;
++                    log_line("gameplay: points=%d lives=%d", m_Points, m_Lives);
++                }
++            }
++            return;
++        }
++    }
++    // Nothing to read: show a full bar rather than the last level's numbers.
++    m_Points = 0;
++    m_Lives = kHearts;
++}
++
++void CMinecraftHud::UpdateSelection(CKContext *context)
++{
++    // The hotbar has no items yet, so the selection is whatever number key the
++    // player is holding -- the same way Minecraft picks a slot, and enough for a
++    // screenshot to prove the highlight moves.
++    CKInputManager *input =
++        context ? (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID) : nullptr;
++    if (!input) return;
++    for (int slot = 0; slot < kHotbarSlots; ++slot)
++    {
++        if (input->IsKeyDown((CKDWORD)(CKKEY_1 + slot)))
++        {
++            m_SelectedSlot = slot;
++            return;
++        }
++    }
++}
++
++void CMinecraftHud::RenderCallback(CKRenderContext *device, void *argument)
++{
++    if (!device || !argument) return;
++    static_cast<CMinecraftHud *>(argument)->Draw(device);
++}
++
++void CMinecraftHud::FillRect(CKRenderContext *device, float left, float top, float right,
++                             float bottom, CKDWORD color)
++{
++    if (!device || right <= left || bottom <= top) return;
++    device->SetTexture(NULL);
++    device->SetState(VXRENDERSTATE_CULLMODE, VXCULL_NONE);
++    device->SetState(VXRENDERSTATE_ZWRITEENABLE, FALSE);
++    device->SetState(VXRENDERSTATE_ALPHABLENDENABLE, TRUE);
++    device->SetState(VXRENDERSTATE_SRCBLEND, VXBLEND_SRCALPHA);
++    device->SetState(VXRENDERSTATE_DESTBLEND, VXBLEND_INVSRCALPHA);
++
++    VxDrawPrimitiveData *data = device->GetDrawPrimitiveStructure(CKRST_DP_CL_VC, 4);
++    if (!data) return;
++#if CKVERSION == 0x13022002 || CKVERSION == 0x05082002
++    VxVector4 *positions = (VxVector4 *)data->PositionPtr;
++    const unsigned int positionStride = data->PositionStride;
++    CKDWORD *colors = (CKDWORD *)data->ColorPtr;
++    VxFillStructure(4, colors, data->ColorStride, 4, &color);
++#else
++    VxVector4 *positions = (VxVector4 *)data->Positions.Ptr;
++    const unsigned int positionStride = data->Positions.Stride;
++    CKDWORD *colors = (CKDWORD *)data->Colors.Ptr;
++    VxFillStructure(4, colors, data->Colors.Stride, 4, &color);
++#endif
++    const float xs[4] = {left, right, right, left};
++    const float ys[4] = {top, top, bottom, bottom};
++    for (int i = 0; i < 4; ++i)
++    {
++        positions->x = xs[i];
++        positions->y = ys[i];
++        positions->z = 0.0f;
++        positions->w = 1.0f;
++        positions = (VxVector4 *)((CKBYTE *)positions + positionStride);
++    }
++    device->DrawPrimitive(VX_TRIANGLEFAN, NULL, 4, data);
++}
++
++// A free quad: the arm is a parallelogram, and an axis-aligned rectangle cannot
++// be one.
++void CMinecraftHud::FillQuad(CKRenderContext *device, const float *xs, const float *ys,
++                             CKDWORD color)
++{
++    if (!device) return;
++    device->SetTexture(NULL);
++    device->SetState(VXRENDERSTATE_CULLMODE, VXCULL_NONE);
++    device->SetState(VXRENDERSTATE_ZWRITEENABLE, FALSE);
++    device->SetState(VXRENDERSTATE_ALPHABLENDENABLE, TRUE);
++    device->SetState(VXRENDERSTATE_SRCBLEND, VXBLEND_SRCALPHA);
++    device->SetState(VXRENDERSTATE_DESTBLEND, VXBLEND_INVSRCALPHA);
++
++    VxDrawPrimitiveData *data = device->GetDrawPrimitiveStructure(CKRST_DP_CL_VC, 4);
++    if (!data) return;
++#if CKVERSION == 0x13022002 || CKVERSION == 0x05082002
++    VxVector4 *positions = (VxVector4 *)data->PositionPtr;
++    const unsigned int positionStride = data->PositionStride;
++    CKDWORD *colors = (CKDWORD *)data->ColorPtr;
++    VxFillStructure(4, colors, data->ColorStride, 4, &color);
++#else
++    VxVector4 *positions = (VxVector4 *)data->Positions.Ptr;
++    const unsigned int positionStride = data->Positions.Stride;
++    CKDWORD *colors = (CKDWORD *)data->Colors.Ptr;
++    VxFillStructure(4, colors, data->Colors.Stride, 4, &color);
++#endif
++    for (int i = 0; i < 4; ++i)
++    {
++        positions->x = xs[i];
++        positions->y = ys[i];
++        positions->z = 0.0f;
++        positions->w = 1.0f;
++        positions = (VxVector4 *)((CKBYTE *)positions + positionStride);
++    }
++    device->DrawPrimitive(VX_TRIANGLEFAN, NULL, 4, data);
++}
++
++float CMinecraftHud::TextWidth(const char *text) const
++{
++    return text ? (float)strlen(text) * mc_font::kCellWidth * m_Unit : 0.0f;
++}
++
++void CMinecraftHud::DrawText(CKRenderContext *device, float x, float y, const char *text,
++                             CKDWORD color)
++{
++    if (!device || !text || !m_Material) return;
++    m_Material->SetAsCurrent(device);
++    device->SetState(VXRENDERSTATE_ALPHABLENDENABLE, TRUE);
++    device->SetState(VXRENDERSTATE_SRCBLEND, VXBLEND_SRCALPHA);
++    device->SetState(VXRENDERSTATE_DESTBLEND, VXBLEND_INVSRCALPHA);
++    device->SetState(VXRENDERSTATE_CULLMODE, VXCULL_NONE);
++    device->SetState(VXRENDERSTATE_ZWRITEENABLE, FALSE);
++    device->SetState(VXRENDERSTATE_LIGHTING, FALSE);
++
++    const float cellWidth = mc_font::kCellWidth * m_Unit;
++    const float cellHeight = mc_font::kCellHeight * m_Unit;
++    float cursor = x;
++    for (const char *p = text; *p; ++p)
++    {
++        const int code = (unsigned char)*p;
++        if (code > 0x20 && code < mc_font::kFirstCode + mc_font::kGlyphCount)
++        {
++            const int index = code - mc_font::kFirstCode;
++            const int cellX = (index % mc_font::kColumns) * mc_font::kCellWidth;
++            const int cellY = (index / mc_font::kColumns) * mc_font::kCellHeight;
++            const float u0 = (float)cellX / (float)kAtlasWidth;
++            const float v0 = (float)cellY / (float)kAtlasHeight;
++            const float u1 = (float)(cellX + mc_font::kCellWidth) / (float)kAtlasWidth;
++            const float v1 = (float)(cellY + mc_font::kCellHeight) / (float)kAtlasHeight;
++            draw_glyph(device, cursor, y, cursor + cellWidth, y + cellHeight, u0, v0, u1, v1,
++                       color);
++        }
++        cursor += cellWidth;
++    }
++}
++
++void CMinecraftHud::DrawCrosshair(CKRenderContext *device, float width, float height)
++{
++    const float centreX = width * 0.5f;
++    const float centreY = height * 0.5f;
++    const float arm = 9.0f * m_Unit;
++    const float thickness = m_Unit > 1.0f ? m_Unit : 1.0f;
++
++    // A dark edge under a white crosshair: Ballance's sky is bright enough that a
++    // white-only crosshair disappears over it.
++    const float shadow = thickness * 2.0f;
++    FillRect(device, centreX - arm - thickness, centreY - shadow * 0.5f,
++             centreX + arm + thickness, centreY + shadow * 0.5f, colour_crosshair_shadow());
++    FillRect(device, centreX - shadow * 0.5f, centreY - arm - thickness,
++             centreX + shadow * 0.5f, centreY + arm + thickness, colour_crosshair_shadow());
++
++    FillRect(device, centreX - arm, centreY - thickness * 0.5f, centreX + arm,
++             centreY + thickness * 0.5f, colour_crosshair());
++    FillRect(device, centreX - thickness * 0.5f, centreY - arm, centreX + thickness * 0.5f,
++             centreY + arm, colour_crosshair());
++}
++
++void CMinecraftHud::DrawHotbar(CKRenderContext *device, float width, float height)
++{
++    const float slot = 20.0f * m_Unit;
++    const float gap = 0.0f;
++    const float rim = m_Unit > 1.0f ? m_Unit : 1.0f;
++    const float barWidth = (float)kHotbarSlots * slot;
++    const float barLeft = (width - barWidth) * 0.5f;
++    const float barBottom = height - 4.0f * m_Unit;
++    const float barTop = barBottom - slot;
++    m_HotbarTop = barTop;
++    m_HotbarLeft = barLeft;
++
++    FillRect(device, barLeft - rim * 2.0f, barTop - rim * 2.0f, barLeft + barWidth + rim * 2.0f,
++             barBottom + rim * 2.0f, colour_hotbar_frame());
++    for (int i = 0; i < kHotbarSlots; ++i)
++    {
++        const float left = barLeft + (float)i * (slot + gap);
++        FillRect(device, left + rim, barTop + rim, left + slot - rim, barBottom - rim,
++                 colour_hotbar_slot());
++        // A rim on all four sides is what makes nine dark squares read as a
++        // hotbar instead of one long dark strip: with the fill inset, the frame
++        // colour shows through between neighbouring slots.
++        FillRect(device, left, barTop, left + slot, barTop + rim, colour_hotbar_rim());
++        FillRect(device, left, barBottom - rim, left + slot, barBottom, colour_hotbar_rim());
++        FillRect(device, left, barTop, left + rim, barBottom, colour_hotbar_rim());
++        FillRect(device, left + slot - rim, barTop, left + slot, barBottom, colour_hotbar_rim());
++    }
++    // The selected slot is lifted by two pixels and outlined, the way Minecraft
++    // does it; the lift is also what makes the change visible in a diff.
++    const float selectedLeft = barLeft + (float)m_SelectedSlot * (slot + gap);
++    const float lift = rim * 2.0f;
++    FillRect(device, selectedLeft - rim, barTop - lift - rim, selectedLeft + slot + rim,
++             barTop - lift, colour_hotbar_selected());
++    FillRect(device, selectedLeft - rim, barTop - lift - rim, selectedLeft - rim + rim,
++             barBottom - lift, colour_hotbar_selected());
++    FillRect(device, selectedLeft + slot, barTop - lift - rim, selectedLeft + slot + rim,
++             barBottom - lift, colour_hotbar_selected());
++    FillRect(device, selectedLeft - rim, barBottom - lift - rim, selectedLeft + slot + rim,
++             barBottom - lift, colour_hotbar_selected());
++}
++
++void CMinecraftHud::DrawHearts(CKRenderContext *device, float left, float bottom)
++{
++    const float heart = 8.0f * m_Unit;
++    const float spacing = 1.0f * m_Unit;
++    const float pixel = heart / (float)kHeartShapeWidth;
++    const float top = bottom - (float)kHeartShapeHeight * pixel;
++
++    BatchRect lit[kHearts * kHeartShapeWidth * kHeartShapeHeight];
++    BatchRect empty[kHearts * kHeartShapeWidth * kHeartShapeHeight];
++    int litCount = 0;
++    int emptyCount = 0;
++    for (int i = 0; i < kHearts; ++i)
++    {
++        const float originX = left + (float)i * (heart + spacing);
++        const bool alive = i < m_Lives;
++        for (int row = 0; row < kHeartShapeHeight; ++row)
++        {
++            const char *line = kHeartShape[row];
++            for (int column = 0; column < kHeartShapeWidth; ++column)
++            {
++                if (line[column] != 'X') continue;
++                BatchRect rect;
++                rect.left = originX + (float)column * pixel;
++                rect.top = top + (float)row * pixel;
++                rect.right = rect.left + pixel;
++                rect.bottom = rect.top + pixel;
++                if (alive) lit[litCount++] = rect;
++                else empty[emptyCount++] = rect;
++            }
++        }
++    }
++
++    // One draw call per colour: 560 pixels is 1120 triangles, and issuing them one
++    // by one would cost more than the rest of the frame.
++    const int total = litCount + emptyCount;
++    if (total <= 0 || total > kMaxBatchRects * 4) return;
++    VxDrawPrimitiveData *data =
++        device->GetDrawPrimitiveStructure(CKRST_DP_CL_VC, (CKDWORD)(total * 6));
++    if (!data) return;
++    device->SetTexture(NULL);
++    device->SetState(VXRENDERSTATE_CULLMODE, VXCULL_NONE);
++    device->SetState(VXRENDERSTATE_ZWRITEENABLE, FALSE);
++    device->SetState(VXRENDERSTATE_ALPHABLENDENABLE, TRUE);
++    device->SetState(VXRENDERSTATE_SRCBLEND, VXBLEND_SRCALPHA);
++    device->SetState(VXRENDERSTATE_DESTBLEND, VXBLEND_INVSRCALPHA);
++#if CKVERSION == 0x13022002 || CKVERSION == 0x05082002
++    VxVector4 *positions = (VxVector4 *)data->PositionPtr;
++    const unsigned int positionStride = data->PositionStride;
++    CKDWORD *colors = (CKDWORD *)data->ColorPtr;
++    const unsigned int colorStride = data->ColorStride;
++#else
++    VxVector4 *positions = (VxVector4 *)data->Positions.Ptr;
++    const unsigned int positionStride = data->Positions.Stride;
++    CKDWORD *colors = (CKDWORD *)data->Colors.Ptr;
++    const unsigned int colorStride = data->Colors.Stride;
++#endif
++    const CKDWORD aliveColor = colour_heart();
++    const CKDWORD deadColor = colour_heart_empty();
++    const BatchRect *groups[2] = {empty, lit};
++    const CKDWORD groupColors[2] = {deadColor, aliveColor};
++    const int groupCounts[2] = {emptyCount, litCount};
++    VxVector4 *cursor = positions;
++    CKDWORD *cursorColor = colors;
++    for (int g = 0; g < 2; ++g)
++    {
++        for (int i = 0; i < groupCounts[g]; ++i)
++        {
++            const BatchRect &r = groups[g][i];
++            const float xs[6] = {r.left, r.right, r.right, r.left, r.right, r.left};
++            const float ys[6] = {r.top, r.top, r.bottom, r.top, r.bottom, r.bottom};
++            for (int v = 0; v < 6; ++v)
++            {
++                cursor->x = xs[v];
++                cursor->y = ys[v];
++                cursor->z = 0.0f;
++                cursor->w = 1.0f;
++                cursor = (VxVector4 *)((CKBYTE *)cursor + positionStride);
++                *cursorColor = groupColors[g];
++                cursorColor = (CKDWORD *)((CKBYTE *)cursorColor + colorStride);
++            }
++        }
++    }
++    device->DrawPrimitive(VX_TRIANGLELIST, NULL, (CKDWORD)(total * 6), data);
++}
++
++void CMinecraftHud::DrawExperienceBar(CKRenderContext *device, float width, float baseline)
++{
++    const float barWidth = (float)kHotbarSlots * 20.0f * m_Unit;
++    const float barHeight = 5.0f * m_Unit;
++    const float left = (width - barWidth) * 0.5f;
++    const float bottom = baseline;
++    const float top = bottom - barHeight;
++
++    // The score is the experience bar: whole hundreds are a level, the remainder
++    // is the progress inside it. A Ballance level scores a few hundred to a few
++    // thousand points, so the bar visibly moves as the ball rolls.
++    const int score = m_Points > 0 ? m_Points : 0;
++    const int level = score / 100;
++    const float fraction = (float)(score % 100) / 100.0f;
++
++    FillRect(device, left - m_Unit, top - m_Unit, left + barWidth + m_Unit, bottom + m_Unit,
++             colour_xp_back());
++    FillRect(device, left, top, left + barWidth * fraction, bottom, colour_xp_fill());
++
++    if (level > 0)
++    {
++        char text[16];
++        snprintf(text, sizeof(text), "%d", level);
++        const float textX = (width - TextWidth(text)) * 0.5f;
++        const float textY = top - mc_font::kCellHeight * m_Unit - m_Unit;
++        DrawText(device, textX, textY, text, colour_xp_text());
++    }
++}
++
++void CMinecraftHud::DrawArm(CKRenderContext *device, float width, float height)
++{
++    // Steve's own screen-space arm. It is drawn flat on purpose: a mesh inside the
++    // scene would be depth tested against the track and clipped by the near plane
++    // the moment the camera turns, and the arm has to sit in front of everything
++    // by definition.
++    const float bob = sinf(m_Elapsed * 4.4f) * 3.0f * m_Unit;
++    const float sway = cosf(m_Elapsed * 2.1f) * 2.0f * m_Unit;
++
++    const float ax = width * 0.94f + sway;
++    const float ay = height * 1.12f + bob;
++    const float bx = width * 0.62f + sway;
++    const float by = height * 0.46f + bob;
++
++    float dx = bx - ax;
++    float dy = by - ay;
++    const float length = sqrtf(dx * dx + dy * dy);
++    if (length < 1.0f) return;
++    dx /= length;
++    dy /= length;
++    const float halfWidth = 0.075f * height * m_HudScale;
++    const float px = -dy * halfWidth;
++    const float py = dx * halfWidth;
++
++    // Sleeve, from the bottom-right corner to two thirds of the way up.
++    {
++        const float t0 = 0.0f;
++        const float t1 = 0.46f;
++        const float x0 = ax + dx * length * t0;
++        const float y0 = ay + dy * length * t0;
++        const float x1 = ax + dx * length * t1;
++        const float y1 = ay + dy * length * t1;
++        const float xs[4] = {x0 + px, x1 + px, x1 - px, x0 - px};
++        const float ys[4] = {y0 + py, y1 + py, y1 - py, y0 - py};
++        FillQuad(device, xs, ys, colour_sleeve());
++        // A darker edge along one side reads as shading without a texture.
++        const float xsEdge[4] = {x0 + px, x1 + px, x1 + px * 0.55f, x0 + px * 0.55f};
++        const float ysEdge[4] = {y0 + py, y1 + py, y1 + py * 0.55f, y0 + py * 0.55f};
++        FillQuad(device, xsEdge, ysEdge, colour_sleeve_dark());
++    }
++
++    // Forearm and hand: skin, narrower than the sleeve.
++    {
++        const float t0 = 0.40f;
++        const float t1 = 0.78f;
++        const float x0 = ax + dx * length * t0;
++        const float y0 = ay + dy * length * t0;
++        const float x1 = ax + dx * length * t1;
++        const float y1 = ay + dy * length * t1;
++        const float skinX = px * 0.86f;
++        const float skinY = py * 0.86f;
++        const float xs[4] = {x0 + skinX, x1 + skinX, x1 - skinX, x0 - skinX};
++        const float ys[4] = {y0 + skinY, y1 + skinY, y1 - skinY, y0 - skinY};
++        FillQuad(device, xs, ys, colour_skin());
++        const float xsEdge[4] = {x0 - skinX, x1 - skinX, x1 - skinX * 0.5f, x0 - skinX * 0.5f};
++        const float ysEdge[4] = {y0 - skinY, y1 - skinY, y1 - skinY * 0.5f, y0 - skinY * 0.5f};
++        FillQuad(device, xsEdge, ysEdge, colour_skin_dark());
++    }
++
++    // A dirt block in that hand, two faces of it, because Minecraft's first
++    // person view always has something being carried.
++    {
++        const float handX = ax + dx * length * 0.80f;
++        const float handY = ay + dy * length * 0.80f;
++        const float half = 0.055f * height * m_HudScale;
++        const float depth = half * 0.55f;
++        const float front[4] = {handX - half, handX + half, handX + half, handX - half};
++        const float frontY[4] = {handY - half, handY - half, handY + half, handY + half};
++        FillQuad(device, front, frontY, colour_dirt());
++        const float topX[4] = {handX - half, handX + half, handX + half + depth,
++                               handX - half + depth};
++        const float topY[4] = {handY - half, handY - half, handY - half - depth,
++                               handY - half - depth};
++        FillQuad(device, topX, topY, colour_dirt_top());
++    }
++}
++
++void CMinecraftHud::Draw(CKRenderContext *device)
++{
++    if (!m_HudOn || !m_InLevel || !device) return;
++
++    const float width = (float)device->GetWidth();
++    const float height = (float)device->GetHeight();
++    if (width < 1.0f || height < 1.0f) return;
++
++    // One unit is one pixel at 640x480, which is the resolution this port starts
++    // at, times the player's own HUD scale.
++    const float shorter = width < height ? width : height;
++    m_Unit = (shorter / 480.0f) * m_HudScale;
++    if (m_Unit < 0.5f) m_Unit = 0.5f;
++
++    // The hotbar goes first because its geometry is what the two elements above
++    // it are placed against. It is also the bottom of the stack, so the order on
++    // screen is unchanged.
++    DrawHotbar(device, width, height);
++    DrawExperienceBar(device, width, m_HotbarTop - 6.0f * m_Unit);
++    DrawHearts(device, m_HotbarLeft, m_HotbarTop - 14.0f * m_Unit);
++    DrawCrosshair(device, width, height);
++
++    // The arm comes last and only in first person: an arm hanging over a
++    // third-person view of the ball would be a lie.
++    const bool firstPerson = m_Steve && m_Steve->FirstPersonActive();
++    if (firstPerson) DrawArm(device, width, height);
++}
++
++void CMinecraftHud::Shutdown(CKContext *context)
++{
++    if (!context) return;
++    if (m_Material)
++    {
++        context->DestroyObject(m_Material);
++        m_Material = nullptr;
++    }
++    if (m_FontTexture)
++    {
++        context->DestroyObject(m_FontTexture);
++        m_FontTexture = nullptr;
++    }
++    m_ResourcesReady = false;
++    m_CallbackInstalled = false;
++    m_Energy = nullptr;
++    m_EnergyId = 0;
++}
+diff --git a/src/MinecraftHud.h b/src/MinecraftHud.h
+new file mode 100644
+index 0000000..848059f
+--- /dev/null
++++ b/src/MinecraftHud.h
+@@ -0,0 +1,111 @@
++#ifndef PLAYER_MINECRAFTHUD_H
++#define PLAYER_MINECRAFTHUD_H
++
++#include "CKAll.h"
++
++class CMinecraftSettings;
++class CMinecraftSteve;
++
++// Minecraft's own HUD, drawn over the Ballance frame: crosshair, hotbar, hearts,
++// experience bar, and the first-person arm.
++//
++// Separate from CMinecraftOverlay on purpose. The panel owns the pointer and
++// stops the clock while it is open; the HUD never takes input and has to keep
++// drawing while the world runs. Both hang off the render context's post-sprite
++// list, and the HUD is registered first so the panel's backdrop covers it.
++//
++// The numbers come from the level's own gameplay data, not from the panel:
++//
++//   Energy[0].Points  -> the experience bar and the level number above it
++//   Energy[0].Lives   -> the ten hearts
++//
++// A menu or a custom level without an Energy array simply reads as "not
++// available", and the HUD then draws a full set instead of garbage.
++//
++// Everything is drawn in screen space, in the same pass the interface building
++// blocks use (BuildingBlocks/Interface/DrawingPrimitives.cpp), so it needs no
++// scene, no 2D entity and no camera.
++class CMinecraftHud
++{
++public:
++    CMinecraftHud();
++    ~CMinecraftHud();
++
++    void SetSettings(const CMinecraftSettings *settings) { m_Settings = settings; }
++    // Steve answers two questions the HUD cannot answer itself: is the camera
++    // the first-person rig (only then is an arm the right thing to draw), and is
++    // a level running at all.
++    void SetSteve(const CMinecraftSteve *steve) { m_Steve = steve; }
++
++    // Once per drawn frame, before CKRenderContext::Render(). Nothing is drawn
++    // here: Draw() runs later, from the post-sprite callback.
++    void Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds);
++
++    void Shutdown(CKContext *context);
++
++    bool Enabled() const { return m_HudOn; }
++    bool InLevel() const { return m_InLevel; }
++    bool HasGameplay() const { return m_HasGameplay; }
++    int Points() const { return m_Points; }
++    int Lives() const { return m_Lives; }
++
++private:
++    void ReadEnvironment();
++    bool EnsureResources(CKContext *context, CKRenderContext *renderContext);
++    void UpdateLevelState(CKRenderContext *renderContext);
++    void ReadGameplay(CKContext *context);
++    void UpdateSelection(CKContext *context);
++
++    void Draw(CKRenderContext *device);
++    void DrawCrosshair(CKRenderContext *device, float width, float height);
++    void DrawHotbar(CKRenderContext *device, float width, float height);
++    void DrawHearts(CKRenderContext *device, float left, float bottom);
++    void DrawExperienceBar(CKRenderContext *device, float width, float baseline);
++    void DrawArm(CKRenderContext *device, float width, float height);
++
++    void FillRect(CKRenderContext *device, float left, float top, float right, float bottom,
++                  CKDWORD color);
++    void FillQuad(CKRenderContext *device, const float *xs, const float *ys, CKDWORD color);
++    void DrawText(CKRenderContext *device, float x, float y, const char *text, CKDWORD color);
++    float TextWidth(const char *text) const;
++
++    static void RenderCallback(CKRenderContext *device, void *argument);
++
++    const CMinecraftSettings *m_Settings;
++    const CMinecraftSteve *m_Steve;
++
++    CKTexture *m_FontTexture;
++    CKMaterial *m_Material;
++    bool m_ResourcesReady;
++    bool m_ResourcesFailed;
++    bool m_CallbackInstalled;
++    bool m_EnvironmentRead;
++
++    bool m_HudOn;
++    bool m_InLevel;
++    bool m_LoggedState;
++    float m_HudScale;
++    int m_LevelOverride;
++
++    // The gameplay arrays are re-resolved every frame: a level swap destroys the
++    // array and leaves a pointer that must not be followed.
++    CKDataArray *m_Energy;
++    CK_ID m_EnergyId;
++    int m_PointsColumn;
++    int m_LivesColumn;
++    int m_StartLivesColumn;
++    int m_Points;
++    int m_Lives;
++    bool m_HasGameplay;
++
++    float m_Elapsed;
++    float m_Unit;
++    // Hotbar geometry, computed once per frame and reused by the elements that
++    // hang off it (the bar the hearts and the level number sit above).
++    float m_HotbarLeft;
++    float m_HotbarTop;
++    int m_SelectedSlot;
++    bool m_LoggedGameplay;
++};
++
++#endif // PLAYER_MINECRAFTHUD_H
 diff --git a/src/MinecraftOverlay.cpp b/src/MinecraftOverlay.cpp
 new file mode 100644
 index 0000000..76d5a40
@@ -2170,10 +3171,10 @@ index 0000000..b4d11e7
 +#endif // PLAYER_MINECRAFTOVERLAY_H
 diff --git a/src/MinecraftSettings.cpp b/src/MinecraftSettings.cpp
 new file mode 100644
-index 0000000..6a0a604
+index 0000000..2e1c802
 --- /dev/null
 +++ b/src/MinecraftSettings.cpp
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,307 @@
 +#include "MinecraftSettings.h"
 +
 +#include <math.h>
@@ -2216,6 +3217,10 @@ index 0000000..6a0a604
 +     "; Radians of yaw/pitch per pixel of pointer motion.\n"},
 +    {"Debug", "BALLANCE_MC_STEVE_DEBUG", "Debug log", true, 0.0f, 0.0f, 0.0f,
 +     "; Once a second, log where Steve is and what the gate decided.\n"},
++    {"Hud", "BALLANCE_MC_HUD", "Minecraft HUD", true, 0.0f, 0.0f, 0.0f,
++     "; Crosshair, hotbar, hearts and experience bar drawn over the level.\n"},
++    {"HudScale", "BALLANCE_MC_HUD_SCALE", "HUD scale", false, 0.25f, 0.5f, 3.0f,
++     "; Size of every HUD element. 1 is one pixel per unit at 640x480.\n"},
 +};
 +
 +constexpr int kRowCount = (int)(sizeof(kRows) / sizeof(kRows[0]));
@@ -2280,12 +3285,18 @@ index 0000000..6a0a604
 +CMinecraftSettings::Values CMinecraftSettings::Defaults()
 +{
 +    Values values;
-+    values.steve = true;
++    // The body is off by default: Minecraft is a first-person game, and the arm
++    // the HUD draws is the only part of the player that is supposed to be on
++    // screen. Flip this on to see him from outside again.
++    values.steve = false;
 +    values.followBall = true;
-+    values.firstPerson = false;
++    // First person on, because that is the camera the arm and the HUD belong to.
++    values.firstPerson = true;
 +    values.hideSteve = false;
 +    values.hideBall = false;
 +    values.debugLog = false;
++    values.hud = true;
++    values.hudScale = 1.0f;
 +    // 32 model units tall against a ball that is 4 units across: 0.25 puts Steve
 +    // at twice the ball's height, which is what the first screenshots were
 +    // accepted against. Anything larger dwarfs the level.
@@ -2346,6 +3357,7 @@ index 0000000..6a0a604
 +        case eMcHideSteve: return m_Values.hideSteve;
 +        case eMcHideBall: return m_Values.hideBall;
 +        case eMcDebugLog: return m_Values.debugLog;
++        case eMcHud: return m_Values.hud;
 +        default: return false;
 +    }
 +}
@@ -2360,6 +3372,7 @@ index 0000000..6a0a604
 +        case eMcHideSteve: m_Values.hideSteve = value; break;
 +        case eMcHideBall: m_Values.hideBall = value; break;
 +        case eMcDebugLog: m_Values.debugLog = value; break;
++        case eMcHud: m_Values.hud = value; break;
 +        default: break;
 +    }
 +}
@@ -2370,6 +3383,7 @@ index 0000000..6a0a604
 +    {
 +        case eMcScale: return m_Values.scale;
 +        case eMcSensitivity: return m_Values.sensitivity;
++        case eMcHudScale: return m_Values.hudScale;
 +        default: return 0.0f;
 +    }
 +}
@@ -2383,6 +3397,7 @@ index 0000000..6a0a604
 +    {
 +        case eMcScale: m_Values.scale = value; break;
 +        case eMcSensitivity: m_Values.sensitivity = value; break;
++        case eMcHudScale: m_Values.hudScale = value; break;
 +        default: break;
 +    }
 +}
@@ -2469,10 +3484,10 @@ index 0000000..6a0a604
 +}
 diff --git a/src/MinecraftSettings.h b/src/MinecraftSettings.h
 new file mode 100644
-index 0000000..53a9a34
+index 0000000..2bf0fcd
 --- /dev/null
 +++ b/src/MinecraftSettings.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,95 @@
 +#ifndef PLAYER_MINECRAFTSETTINGS_H
 +#define PLAYER_MINECRAFTSETTINGS_H
 +
@@ -2483,7 +3498,7 @@ index 0000000..53a9a34
 +// that override them, and the rows CMinecraftOverlay draws.
 +enum McSettingRow
 +{
-+    eMcSteve = 0,   // Steve=1           draw Steve in the level at all
++    eMcSteve = 0,   // Steve=0           draw Steve's body in the level at all
 +    eMcFollowBall,  // FollowBall=1      walk with the ball instead of standing still
 +    eMcFirstPerson, // FirstPerson=0     camera at Steve's eyes
 +    eMcHideSteve,   // HideSteve=0       keep the model, do not draw it
@@ -2491,6 +3506,8 @@ index 0000000..53a9a34
 +    eMcScale,       // Scale=0.25        Ballance units per model unit
 +    eMcSensitivity, // Sensitivity=0.0025 radians of yaw/pitch per mouse pixel
 +    eMcDebugLog,    // Debug=0           once a second, log what Steve is doing
++    eMcHud,         // Hud=1             crosshair, hotbar, hearts, experience bar
++    eMcHudScale,    // HudScale=1        size of every HUD element
 +    eMcRowCount
 +};
 +
@@ -2517,6 +3534,8 @@ index 0000000..53a9a34
 +        bool hideSteve;
 +        bool hideBall;
 +        bool debugLog;
++        bool hud;
++        float hudScale;
 +        float scale;
 +        float sensitivity;
 +    };
@@ -2566,10 +3585,10 @@ index 0000000..53a9a34
 +#endif // PLAYER_MINECRAFTSETTINGS_H
 diff --git a/src/MinecraftSteve.cpp b/src/MinecraftSteve.cpp
 new file mode 100644
-index 0000000..9ac8ee0
+index 0000000..31bf83a
 --- /dev/null
 +++ b/src/MinecraftSteve.cpp
-@@ -0,0 +1,1130 @@
+@@ -0,0 +1,1138 @@
 +#include "MinecraftSteve.h"
 +
 +#include "MinecraftSettings.h"
@@ -2819,7 +3838,7 @@ index 0000000..9ac8ee0
 +      m_FollowBall(true), m_Debug(false), m_YawGiven(false), m_LogPending(true), m_DebugTimerReady(false), m_BuildFailed(false), m_Scale(0.25f),
 +      m_FixedYaw(0.0f), m_FixedPosition(0.0f, 0.0f, 0.0f), m_Yaw(0.0f), m_Pitch(0.0f),
 +      m_MouseSumX(0.0f), m_MouseSumY(0.0f), m_MouseFrames(0), m_LogTimer(-1.0f), m_BallScanTimer(0.0f),
-+      m_Hide(false), m_HideBall(false), m_HasCamOffset(false), m_Look(true), m_MouseCapture(true),
++      m_Hide(false), m_DrawBody(false), m_HideBall(false), m_HasCamOffset(false), m_Look(true), m_MouseCapture(true),
 +      m_MenuGate(true), m_MenuUp(false), m_BodyFacing(true),
 +      m_LookSensitivity(0.0025f), m_BodyYaw(0.0f), m_TurnRate(kDefaultTurnRate * kPi / 180.0f),
 +      m_HasLastBallPosition(false), m_LastBallPosition(0.0f, 0.0f, 0.0f), m_BodySpeed(0.0f),
@@ -2848,7 +3867,10 @@ index 0000000..9ac8ee0
 +    m_Height = kModelHeight * m_Scale;
 +    m_EyeHeight = kModelEyeHeight * m_Scale;
 +
-+    m_Enabled = env_flag("BALLANCE_MC_STEVE");
++    // The body and the rig are separate now: BALLANCE_MC_STEVE=1 draws Steve,
++    // BALLANCE_MC_STEVE_FP=1 puts the camera at his eyes without drawing him.
++    m_DrawBody = env_flag("BALLANCE_MC_STEVE");
++    m_Enabled = m_DrawBody || env_flag("BALLANCE_MC_STEVE_FP");
 +    if (!m_Enabled) return false;
 +
 +    m_FirstPerson = env_flag("BALLANCE_MC_STEVE_FP");
@@ -3526,9 +4548,14 @@ index 0000000..9ac8ee0
 +    // Panel clicks land mid-run, so say when the model actually reacts: one
 +    // line here is the proof that the change reached the thing it changes,
 +    // instead of only reaching the ini file.
-+    if (m_Enabled != values.steve) log_line("steve %s", values.steve ? "on" : "off");
++    if (m_DrawBody != values.steve) log_line("steve model %s", values.steve ? "drawn" : "not drawn");
 +    if (m_Hide != values.hideSteve) log_line("steve model %s", values.hideSteve ? "hidden" : "shown");
-+    m_Enabled = values.steve;
++    // Off only when neither the body nor the first-person camera is wanted: the
++    // rig is what the HUD's arm hangs off, so it stays alive without a body.
++    const bool wanted = values.steve || values.firstPerson;
++    if (m_Enabled != wanted) log_line("steve rig %s", wanted ? "on" : "off");
++    m_Enabled = wanted;
++    m_DrawBody = values.steve;
 +    m_FirstPerson = values.firstPerson;
 +    m_Hide = values.hideSteve;
 +    m_HideBall = values.hideBall;
@@ -3617,7 +4644,7 @@ index 0000000..9ac8ee0
 +        log_line("level state: %s", inLevel ? "in a level" : "menu");
 +    }
 +    if (!m_Entity) return;
-+    const bool wantShown = m_InLevel && !(m_FirstPerson || m_Hide);
++    const bool wantShown = m_InLevel && m_DrawBody && !(m_FirstPerson || m_Hide);
 +    if (wantShown != m_AvatarShown) {
 +        m_Entity->Show(wantShown ? CKSHOW : CKHIDE);
 +        m_AvatarShown = wantShown;
@@ -3702,10 +4729,10 @@ index 0000000..9ac8ee0
 +}
 diff --git a/src/MinecraftSteve.h b/src/MinecraftSteve.h
 new file mode 100644
-index 0000000..a64e3b2
+index 0000000..ee357dc
 --- /dev/null
 +++ b/src/MinecraftSteve.h
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,210 @@
 +#ifndef PLAYER_MINECRAFTSTEVE_H
 +#define PLAYER_MINECRAFTSTEVE_H
 +
@@ -3780,6 +4807,14 @@ index 0000000..a64e3b2
 +    // UpdateMenuState.
 +    bool MenuUp() const { return m_MenuGate && m_MenuUp; }
 +
++    // The HUD asks two questions of the rig: is the camera at his eyes right now
++    // (only then is a first-person arm the truth), and is he being drawn at all.
++    // The module now also runs with the body switched off, because the settings
++    // default is "no body, first person", so Enabled() alone would not answer
++    // either question.
++    bool FirstPersonActive() const { return m_Enabled && m_InLevel && m_FirstPerson; }
++    bool BodyDrawn() const { return m_DrawBody; }
++
 +    // First person + look means the pointer has to be *captured*: an uncaptured
 +    // pointer stops at the window edge, and so do the deltas (measured
 +    // 2026-11-04: 640x480 window, 200px of travel bought 28.6 degrees and then
@@ -3812,6 +4847,7 @@ index 0000000..a64e3b2
 +    bool m_DebugTimerReady;
 +    bool m_BuildFailed;
 +    bool m_Hide;
++    bool m_DrawBody;
 +    bool m_HideBall;
 +    bool m_HasCamOffset;
 +    bool m_Look;
