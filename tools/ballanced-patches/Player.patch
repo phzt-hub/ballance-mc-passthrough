@@ -3592,10 +3592,10 @@ index 0000000..2bf0fcd
 +#endif // PLAYER_MINECRAFTSETTINGS_H
 diff --git a/src/MinecraftSteve.cpp b/src/MinecraftSteve.cpp
 new file mode 100644
-index 0000000..31bf83a
+index 0000000..3594c55
 --- /dev/null
 +++ b/src/MinecraftSteve.cpp
-@@ -0,0 +1,1138 @@
+@@ -0,0 +1,1236 @@
 +#include "MinecraftSteve.h"
 +
 +#include "MinecraftSettings.h"
@@ -3845,7 +3845,10 @@ index 0000000..31bf83a
 +      m_FollowBall(true), m_Debug(false), m_YawGiven(false), m_LogPending(true), m_DebugTimerReady(false), m_BuildFailed(false), m_Scale(0.25f),
 +      m_FixedYaw(0.0f), m_FixedPosition(0.0f, 0.0f, 0.0f), m_Yaw(0.0f), m_Pitch(0.0f),
 +      m_MouseSumX(0.0f), m_MouseSumY(0.0f), m_MouseFrames(0), m_LogTimer(-1.0f), m_BallScanTimer(0.0f),
-+      m_Hide(false), m_DrawBody(false), m_HideBall(false), m_HasCamOffset(false), m_Look(true), m_MouseCapture(true),
++      m_Hide(false), m_DrawBody(false), m_HideBall(false), m_ViewOverride(-1),
++      m_ViewKeyHeld(false), m_SettingsSeen(false), m_SettingsFirstPerson(false),
++      m_BallVisibilityTarget(nullptr), m_BallHidden(false),
++      m_HasCamOffset(false), m_Look(true), m_MouseCapture(true),
 +      m_MenuGate(true), m_MenuUp(false), m_BodyFacing(true),
 +      m_LookSensitivity(0.0025f), m_BodyYaw(0.0f), m_TurnRate(kDefaultTurnRate * kPi / 180.0f),
 +      m_HasLastBallPosition(false), m_LastBallPosition(0.0f, 0.0f, 0.0f), m_BodySpeed(0.0f),
@@ -3878,9 +3881,21 @@ index 0000000..31bf83a
 +    // BALLANCE_MC_STEVE_FP=1 puts the camera at his eyes without drawing him.
 +    m_DrawBody = env_flag("BALLANCE_MC_STEVE");
 +    m_Enabled = m_DrawBody || env_flag("BALLANCE_MC_STEVE_FP");
-+    if (!m_Enabled) return false;
-+
 +    m_FirstPerson = env_flag("BALLANCE_MC_STEVE_FP");
++    // The view, fixed before the first frame: the same state F5 writes at
++    // runtime, because a screenshot harness has to run each view as its own
++    // process. Parsed above the bail below, because the third-person product
++    // view has the body off on purpose and would otherwise look like "Steve is
++    // not wanted at all".
++    if (const char *view = getenv("BALLANCE_MC_STEVE_VIEW")) {
++        if (!strcmp(view, "3p") || !strcmp(view, "third") || !strcmp(view, "0"))
++            m_ViewOverride = 0;
++        else if (!strcmp(view, "fp") || !strcmp(view, "first") || !strcmp(view, "1"))
++            m_ViewOverride = 1;
++        else
++            log_line("BALLANCE_MC_STEVE_VIEW must be 3p or fp (got \"%s\")", view);
++    }
++    if (!m_Enabled && m_ViewOverride < 0) return false;
 +    m_Debug = env_flag("BALLANCE_MC_STEVE_DEBUG");
 +    // -1 = decide from the camera, 0 = "pretend a menu is up", 1 = "pretend a
 +    // level is running". The screenshots harnesses run with a merged level and
@@ -4162,8 +4177,51 @@ index 0000000..31bf83a
 +    return true;
 +}
 +
++// One avatar at a time, and which one is a property of the view:
++//
++//   third person -- the ball *is* the player. It is what the game's camera
++//                   follows and what the player watches roll. Steve's body is a
++//                   separate, opt-in model (the Steve row), off by default.
++//   first person -- the camera sits at his eyes, three units above a ball whose
++//                   top is under his feet, so a drawn ball fills the bottom of
++//                   the screen the moment the player looks down. Hide it: in
++//                   this view the HUD's arm is the body.
++//
++// HideBall stays the A/B override the shot scripts pass, and hiding the model
++// (m_Hide) means "leave the game alone", so it leaves the ball alone too.
++void CMinecraftSteve::UpdateBallVisibility() {
++    if (!m_Ball) {
++        m_BallVisibilityTarget = nullptr;
++        m_BallHidden = false;
++        return;
++    }
++    const bool hide = m_HideBall || (m_FirstPerson && !m_Hide);
++    const bool decisionChanged = m_Ball != m_BallVisibilityTarget || hide != m_BallHidden;
++    if (decisionChanged) {
++        m_BallVisibilityTarget = m_Ball;
++        m_BallHidden = hide;
++        log_line("ball %s (%s)", hide ? "hidden" : "drawn",
++                 m_FirstPerson ? "first person" : "third person");
++    }
++    // The level's own ball script shows the ball again every frame, so a one-shot
++    // hide loses that race and the ball stays on screen. Re-assert it while it is
++    // supposed to be gone -- but only the decision is logged, once, or this would
++    // be a line every frame.
++    if (hide) {
++        if (m_Ball->IsVisible()) m_Ball->Show(CKHIDE);
++        return;
++    }
++    m_Ball->Show(CKSHOW);
++}
++
 +void CMinecraftSteve::UpdatePlacement(CKContext *context, float deltaSeconds) {
 +    if (!m_Entity) return;
++
++    // Following the ball, none found yet: stay where he is. The level builds its
++    // ball a few frames after it starts, and falling back to a fixed position
++    // would park him at (0,0,0) -- inside the level -- for those frames, which in
++    // first person is a frame of the camera sitting in the geometry.
++    if (m_FollowBall && !m_Ball) return;
 +
 +    VxVector target = m_FixedPosition;
 +    if (m_FollowBall && m_Ball) {
@@ -4176,7 +4234,7 @@ index 0000000..31bf83a
 +        target = VxVector(ballPosition.x, ballPosition.y - radius, ballPosition.z);
 +    }
 +    m_Entity->SetPosition(&target);
-+    if (m_HideBall && m_Ball) m_Ball->Show(CKHIDE);
++    UpdateBallVisibility();
 +
 +    UpdateBodyYaw(target, deltaSeconds);
 +
@@ -4338,6 +4396,22 @@ index 0000000..31bf83a
 +             menuUp ? "released" : "captured");
 +}
 +
++// F5 flips the view while the game runs. It writes the same override the
++// settings feed, so the key and the panel row describe one state instead of two
++// flags that can disagree.
++void CMinecraftSteve::UpdateViewKey(CKContext *context) {
++    if (!context || m_PanelOpen) return;
++    CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (!input) return;
++    const bool down = input->IsKeyDown(CKKEY_F5) != FALSE || KeyTappedThisFrame(input, CKKEY_F5);
++    if (down && !m_ViewKeyHeld) {
++        const bool firstPerson = m_ViewOverride >= 0 ? (m_ViewOverride != 0) : m_FirstPerson;
++        m_ViewOverride = firstPerson ? 0 : 1;
++        log_line("view key: F5 -> %s", m_ViewOverride ? "first person" : "third person");
++    }
++    m_ViewKeyHeld = down;
++}
++
 +// Body yaw follows the heading of travel, not the camera: the ball rolls one
 +// way and the head looks another.
 +//
@@ -4466,9 +4540,14 @@ index 0000000..31bf83a
 +        // The player ball is I_Ball_* ("I" = the interactive item the level
 +        // hands to the player); Ball_Pos_Frame / Ball_*_piece are the ball's
 +        // helper frames and debris and sit at the origin until the level runs.
++        // Only the interactive ball is the player. Plenty of objects merely
++        // contain "ball" in their name -- Ball_LightningSphere, Balls_MF,
++        // Ball_Particle_Frame -- and following one of those parks Steve at a
++        // decoration: measured (54.1, 15.7, -153.1), the balloon's hinge, instead
++        // of level 01's start pad.
 +        const bool playerBall = !strncmp(name, "I_Ball", 6);
-+        const bool better = !m_Ball || playerBall;
-+        if (better) {
++        if (!playerBall) continue;
++        {
 +            if (m_Ball != entity) {
 +                log_line("following \"%s\" (size %.2f x %.2f x %.2f)", name,
 +                         entity->GetBoundingBox(FALSE).GetSize().x,
@@ -4559,11 +4638,27 @@ index 0000000..31bf83a
 +    if (m_Hide != values.hideSteve) log_line("steve model %s", values.hideSteve ? "hidden" : "shown");
 +    // Off only when neither the body nor the first-person camera is wanted: the
 +    // rig is what the HUD's arm hangs off, so it stays alive without a body.
-+    const bool wanted = values.steve || values.firstPerson;
++    // The panel row is the stored view; F5 overrides it for the rest of the run,
++    // and touching the row hands control back. Without the hand-back the key
++    // would keep winning and the row would read as broken.
++    if (!m_SettingsSeen) {
++        m_SettingsSeen = true;
++        m_SettingsFirstPerson = values.firstPerson;
++    } else if (values.firstPerson != m_SettingsFirstPerson) {
++        m_SettingsFirstPerson = values.firstPerson;
++        if (m_ViewOverride >= 0) log_line("first person row took the view back from F5");
++        m_ViewOverride = -1;
++    }
++    const bool firstPerson = m_ViewOverride >= 0 ? (m_ViewOverride != 0) : values.firstPerson;
++    if (m_FirstPerson != firstPerson)
++        log_line("view %s", firstPerson ? "first person" : "third person");
++    // A view asked for by hand keeps the rig alive even when the stored settings
++    // say "no body and no first-person camera": F5 has to work from cold.
++    const bool wanted = values.steve || values.firstPerson || m_ViewOverride >= 0;
 +    if (m_Enabled != wanted) log_line("steve rig %s", wanted ? "on" : "off");
 +    m_Enabled = wanted;
 +    m_DrawBody = values.steve;
-+    m_FirstPerson = values.firstPerson;
++    m_FirstPerson = firstPerson;
 +    m_Hide = values.hideSteve;
 +    m_HideBall = values.hideBall;
 +    m_Debug = values.debugLog;
@@ -4588,6 +4683,7 @@ index 0000000..31bf83a
 +        m_EnvironmentRead = true;
 +        ReadEnvironment();
 +    }
++    UpdateViewKey(context);
 +    ApplySettings();
 +    if (!m_Enabled) {
 +        // Turning Steve off from the panel has to take him off screen, not just
@@ -4668,6 +4764,8 @@ index 0000000..31bf83a
 +        m_Ball = nullptr;
 +        m_BallId = 0;
 +        m_HasLastBallPosition = false;
++        m_BallVisibilityTarget = nullptr;
++        m_BallHidden = false;
 +        log_line("ball went away with the old level; looking again");
 +    }
 +    if (m_Camera && !ObjectStillThere(context, m_Camera, m_CameraId)) {
@@ -4736,10 +4834,10 @@ index 0000000..31bf83a
 +}
 diff --git a/src/MinecraftSteve.h b/src/MinecraftSteve.h
 new file mode 100644
-index 0000000..ee357dc
+index 0000000..a9c5a67
 --- /dev/null
 +++ b/src/MinecraftSteve.h
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,228 @@
 +#ifndef PLAYER_MINECRAFTSTEVE_H
 +#define PLAYER_MINECRAFTSTEVE_H
 +
@@ -4768,7 +4866,11 @@ index 0000000..ee357dc
 +//   BALLANCE_MC_STEVE_BALL=0   do not follow the ball entity, stay at POS
 +//   BALLANCE_MC_STEVE_YAW=deg  fixed yaw, overrides the ball heading
 +//   BALLANCE_MC_STEVE_SCALE=f  Ballance units per model unit (default 1)
-+//   BALLANCE_MC_STEVE_FP=1     park the camera at Steve's eyes
++//   BALLANCE_MC_STEVE_FP=1     park the camera at Steve's eyes (third person
++//                               shows the ball and no body; first person hides
++//                               the ball and shows the arm)
++//   BALLANCE_MC_STEVE_VIEW=3p|fp  start in this view, and keep the rig running
++//                               even with the body off (F5 flips it live)
 +//   BALLANCE_MC_STEVE_LOOK=0   ignore the mouse (look control is on by default)
 +//   BALLANCE_MC_STEVE_SENS=f   radians of yaw/pitch per mouse pixel (default 0.0025)
 +//   BALLANCE_MC_STEVE_MOUSE=0  do not capture the pointer (look still reads deltas)
@@ -4836,6 +4938,8 @@ index 0000000..ee357dc
 +    void FindBall(CKContext *context, float deltaSeconds);
 +    void UpdateLook(CKContext *context);
 +    void UpdateMenuState(CKContext *context);
++    void UpdateViewKey(CKContext *context);
++    void UpdateBallVisibility();
 +    void UpdateLevelState(CKRenderContext *renderContext);
 +    void Validate(CKContext *context);
 +    void UpdateBodyYaw(const VxVector &target, float deltaSeconds);
@@ -4856,6 +4960,18 @@ index 0000000..ee357dc
 +    bool m_Hide;
 +    bool m_DrawBody;
 +    bool m_HideBall;
++    // -1 = follow the settings, 0 = third person, 1 = first person. F5 writes
++    // this and the panel's FirstPerson row clears it again, so whichever the
++    // player touched last wins without the two overwriting each other.
++    int m_ViewOverride;
++    bool m_ViewKeyHeld;
++    bool m_SettingsSeen;
++    bool m_SettingsFirstPerson;
++    // What UpdateBallVisibility last wrote, and to which ball. The level hides
++    // and shows the ball itself, so the decision is only written when it moves:
++    // showing it every frame would undo whatever the level's scripts decided.
++    CK3dEntity *m_BallVisibilityTarget;
++    bool m_BallHidden;
 +    bool m_HasCamOffset;
 +    bool m_Look;
 +    bool m_MouseCapture;

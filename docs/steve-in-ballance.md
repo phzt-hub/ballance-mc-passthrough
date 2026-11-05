@@ -14,6 +14,50 @@ M0/M0b 的方向是反的：那套把 Minecraft 整帧贴到 Ballance 窗口上�
 
 HUD 本身见 [`docs/mc-hud.md`](mc-hud.md)。
 
+## 一个画面里只有一个化身（2026-11-05 定）
+
+口径：**第三人称不留 Steve，只渲染球；第一人称留着 Steve 的手臂。** 画什么由「现在哪个视角」
+推出来，不是三个开关碰运气：
+
+| 视角 | 球 | Steve 身体 | 手臂 |
+|---|---|---|---|
+| 第三人称 | 画 | 不画（除非在面板里把 `Steve` 打开） | 不画 |
+| 第一人称 | 藏 | 不画（相机在他眼睛里） | 画 |
+
+- 面板的 `FirstPerson` 行仍是存盘的视角；**F5** 在运行时翻转它（`m_ViewOverride`）。一旦在面板上
+  动了这一行，控制权交回设置、F5 的临时覆盖作废——两边不会互相覆盖。
+- 截图脚本用 `BALLANCE_MC_STEVE_VIEW=3p|fp` 在启动时钉住视角（同一个状态机，只是不用按键）。
+
+验收 `tools/steve/render-view-shots.sh`（**从主菜单点 START -> LEVEL 1 真进关卡**）：
+
+```
+fp: sleeve 4470 / 4570 px, hand 5896 px (the arm, a second apart)
+3p: sleeve 0 px; back in 3p: sleeve 0 px (0 = no arm in third person)
+log: F5 -> first person yes, F5 -> third person yes
+PASS
+```
+
+图片在 `docs/view-shots/`。
+
+**这一轮修掉两个真 bug**（都是这次 A/B 逼出来的，之前看不见）：
+
+1. **藏球根本没生效**。原来只在「决策变化时」写一次 `Show(CKHIDE)`，而关卡自己的球脚本每帧都会把
+   球 `Show` 回来，那一次写入当场被覆盖。改成「该藏就每帧重申一次」（`IsVisible()` 仍为真时才写，
+   日志仍只打一行）。
+2. **假球抢走跟随**。`name_is_ball()` 只要名字里含 `ball` 就算候选，于是 `Ball_LightningSphere`
+   这类装饰先被选中，Steve 被摆到气球铰链 (54.1, 15.7, -153.1)。现在只认 `I_Ball*`；没有球时
+   原地不动（以前回落到 (0,0,0)，第一人称就是相机卡在几何体里）。
+
+## 还没解决：从菜单进的关卡里找不到球
+
+`I_Ball_Stone` 只在**合并关卡**那条路（`--level` + `BALLANCE_POC_CAM`）里出现。从菜单点进
+Level_01 时，上下文里只有 `Ball_*` 装饰，`FindBall()` 一直打 `no runtime ball yet`。
+后果：第一人称的机位其实不在球上，藏球也无从下手——画面上那颗金球是 `Ball_Stone` 一类的网格，
+不是被跟随的实体。
+
+下一步：用「谁在动谁就是球」的差分认实体（`DebugLog` 已经在每秒打 `moved "<name>"`），或者确认
+菜单路径的球属于另一个 scene、`GetObjectListByType(TRUE)` 需要换参数。
+
 ## 做法
 
 `Source/Player/src/MinecraftSteve.cpp`（补丁见 `tools/ballanced-patches/Player.patch`）：
@@ -100,7 +144,17 @@ PASS
 
 ## 截图
 
-`docs/steve-shots/`：
+`docs/view-shots/`（2026-11-05 重拍，**真在 Level_01 里**）：
+
+- `01-third-person.png` 第三人称：球道，没有 Steve、没有手臂
+- `02-first-person-arm.png` 第一人称：手臂 + HUD
+- `03-body-on.png` 同一机位把 `Steve` 打开：他就在那儿（证明相机看得见那个位置，缺省视角只是没要他）
+
+`docs/steve-shots/`（2026-11-05 早些时候，机位走的是**合并关卡**那条路）：
+
+> 那一批是用 `BALLANCE_POC_CAM` 拍的，而这条路径下屏幕上一直留着合成体的主菜单，
+> 所以 `01-steve-on-track.png` 这个名字名不副实：Steve 是站在**主菜单**前面，不是站在球道上。
+> 遮挡、比例、第一人称那些数字仍然成立，但布景不对；要重拍请用 `tools/steve/render-view-shots.sh`。
 
 - `00-control.png` Steve 关掉的对照
 - `01-steve-on-track.png` Steve 站在关卡台面上
