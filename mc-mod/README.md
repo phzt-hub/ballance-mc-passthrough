@@ -1,46 +1,33 @@
-# XP Convert
+# Ballance Passthrough（MC 侧）
 
-MC 26.3 + Fabric Loader 0.19.5 的纯服务端 Mod：手持玻璃瓶右键附魔台，把经验等级灌成附魔之瓶。
+Minecraft **26.3** + Fabric Loader **0.19.5** 的**纯客户端** mod：把每帧画面写进一块
+共享内存邮箱，供 Ballance 侧的穿透渲染逐帧取用。
 
-## 玩法
+mod id `ballance_passthrough`，包 `com.example.ballance.passthrough`，产物
+`build/libs/ballance_passthrough-1.0.0.jar`。没有任何游戏逻辑改动，只有
+`Minecraft#renderFrame` 末尾一个 mixin。
 
-- 手持**玻璃瓶**右键**附魔台** → 消耗 1 玻璃瓶 + 背包里 1 青金石 + 1 级经验 → 得到 1 附魔之瓶，带附魔台音效
-- 拿其他东西 / 空手点附魔台：照常打开附魔界面，不受影响
-- 没青金石或不够 1 级：在 actionbar 提示，不吞操作
+## 代码
 
-## 技术
-
-- 零 mixin，只用 Fabric API 的 `UseBlockCallback`
-- `fabric.mod.json` 标 `environment: server`，纯服务端，客户端不用装
-- 产物 `build/libs/xpconvert-1.0.0.jar`（~7K），已在 Fabric Server 26.3（Loader 0.19.5）上 74 个 Mod 同服验证加载
-
-## 客户端半边：帧导出（Ballance 画面穿透 M0b）
-
-本仓库同时是 **Ballance ⇄ Minecraft 画面穿透**的生产端。装了本 mod 的客户端会把每帧画面
-写进一块 POSIX 共享内存邮箱，另一个仓库（`ballance-mc-passthrough`）里的 Ballance 从邮箱取帧、
-贴在自己的窗口上。游戏逻辑不变，只有 `Minecraft#renderFrame` 末尾加了一个 mixin。
-
-- `src/client/java/.../McFrameExport.java` — 邮箱生产者：把主渲染目标交给 MC 自己的截图回读路径，
-  转成 BGRA8 后发布；三槽轮转 + `FrameId` 原子递增，布局见对端仓库的 `tools/passthrough/mpframe.h`
-- `src/client/java/.../mixin/MinecraftFrameMixin.java` — `renderFrame(Z)V` 的 `@At("TAIL")`
-- `environment` 因此从 `server` 改成 `*`：服务端玩法照旧，客户端多了这个入口点
-
-| 环境变量 | 作用 |
+| 文件 | 作用 |
 |---|---|
-| `BALLANCE_MC_SHM` | 邮箱名，默认 `ballance_mc_frame`（即 `/dev/shm/ballance_mc_frame`） |
+| `src/client/java/.../PassthroughClient.java` | 客户端入口，启动时把邮箱建好（读环境变量） |
+| `src/client/java/.../McFrameExport.java` | 邮箱生产者：主渲染目标走 MC 自己的截图回读路径，转 BGRA8 后发布；三槽轮转 + `FrameId` 原子递增 |
+| `src/client/java/.../mixin/MinecraftFrameMixin.java` | `renderFrame(Z)V` 的 `@At("TAIL")` |
+| 对端 | 邮箱布局见本仓库 `tools/passthrough/mpframe.h`，Ballance 侧 `tools/passthrough/sdlgpu-passthrough.cpp` |
+
+## 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `BALLANCE_MC_SHM` | 邮箱名，默认 `ballance_mc_frame`（Posix 上即 `/dev/shm/ballance_mc_frame`） |
 | `BALLANCE_MC_FPS` | 发布限速，默认 30，`0` = 每帧都发 |
 | `BALLANCE_MC_EXPORT=0` | 完全关闭导出 |
-
-```sh
-./gradlew25 build
-DISPLAY=:99 ./gradlew25 runClient      # Xvfb 上软渲染约 26 fps
-```
 
 ## 构建（本机）
 
 ```sh
 ./gradlew25 build      # 不要直接用 ./gradlew，原因见 gradle.properties 注释
-./gradlew25 runServer  # 联调，端口 25567（run/server.properties），eula 已同意
 ```
 
 环境要求：JDK 25 跑 Gradle daemon（`gradlew25` 会强制指定），源码 `release = 25`。
@@ -49,3 +36,4 @@ DISPLAY=:99 ./gradlew25 runClient      # Xvfb 上软渲染约 26 fps
 ## License
 
 CC0-1.0（沿用 Fabric 模板）。
+

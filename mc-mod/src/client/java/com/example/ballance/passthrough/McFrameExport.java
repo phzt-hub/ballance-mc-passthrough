@@ -1,4 +1,4 @@
-package com.example.xpconvert.client;
+package com.example.ballance.passthrough;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.platform.NativeImage;
@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * </ul>
  */
 public final class McFrameExport {
-    private static final Logger LOGGER = LoggerFactory.getLogger("xpconvert-frame-export");
+    private static final Logger LOGGER = LoggerFactory.getLogger("ballance-passthrough-frame-export");
 
     // Keep in sync with tools/passthrough/mpframe.h.
     private static final int MAGIC = 0x3050464D; // 'M''F''P''0' little endian

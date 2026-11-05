@@ -3,7 +3,7 @@
 #
 #   ./test-m0b.sh <tag> [seconds] [on|off]
 #
-# Prerequisite: Minecraft is already running with the xpconvert client mod
+# Prerequisite: Minecraft is already running with the ballance_passthrough client mod
 # (cd ~/mcmod && DISPLAY=:99 ./gradlew25 runClient) so that
 # /dev/shm/ballance_mc_frame exists and advances. "off" runs the same scene with
 # the consumer disabled, which is the control shot; "on" (default) draws the live

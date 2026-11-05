@@ -1,6 +1,6 @@
-package com.example.xpconvert.client.mixin;
+package com.example.ballance.passthrough.mixin;
 
-import com.example.xpconvert.client.McFrameExport;
+import com.example.ballance.passthrough.McFrameExport;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(Minecraft.class)
 public class MinecraftFrameMixin {
     @Inject(method = "renderFrame(Z)V", at = @At("TAIL"))
-    private void xpconvert$exportFrame(boolean advanceGameTime, CallbackInfo callback) {
+    private void ballancePassthrough$exportFrame(boolean advanceGameTime, CallbackInfo callback) {
         McFrameExport.onFrameRendered((Minecraft) (Object) this);
     }
 }
