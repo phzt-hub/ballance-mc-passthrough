@@ -79,6 +79,40 @@ ssh 上去起的进程落在非交互会话，没有桌面：`Player.exe` 能起
 自动化能做到的只有二值核对：`Player.exe` 里能搜到 `[mc-panel]`/`Restore defaults`/`HideBall` 等字符串
 （面板确实编进去了），以及 exe + DLL 能解析（缺 DLL 会弹框而不是写日志）。
 
+
+## 刷新可玩目录（每次换源码后）
+
+`install` 只更新 `D:\bmc-build\stage`，玩家双击的 `D:\bmc-play` 要单独铺：
+
+```bat
+for %D in (Bin BuildingBlocks Managers Plugins RenderEngines) do robocopy D:\bmc-build\stage\%D D:\bmc-play\%D /E /NFL /NDL /NJH /NJS /NP >nul
+```
+
+两件必做的收尾：
+
+* `stage\Bin\Player.ini` 里 `SkipOpening = 0`，会覆盖掉可玩目录里的 1 —— 铺完再改回 `SkipOpening = 1`，
+  否则每次启动都要等一分钟开场。
+* **删掉 `D:\bmc-play\Bin\Minecraft.ini`**。它是上次试玩留下的存档，会压过新默认值
+  （现在的默认是 `Hud=1 / Steve=0 / FirstPerson=1`）；删掉才会走默认，面板里再改会重新写出来。
+
+### 加了新的源文件，一定要重跑 configure
+
+`build.bat` 只跑 `cmake --build`。上一轮加了 `MinecraftHud.cpp` 却只编了 6 个老目标，
+链接时 4 个 `CMinecraftHud` 符号未解析（`LNK2019`）——`build.ninja` 还是旧的，源文件列表里没有它。
+`run2.bat`（先 `configure.bat` 再 `build.bat`，两者各自带日志）就是为这个准备的：
+
+```bat
+:: D:\bmc-build\run2.bat
+call D:\bmc-build\configure.bat > D:\bmc-build\configure.log 2>&1
+call D:\bmc-build\build.bat > D:\bmc-build\build.log 2>&1
+```
+
+### 一个 MSVC 才有的坑：POSIX 字符串函数
+
+`strncasecmp` 在 MSVC 里只有 `_strnicmp`。`MinecraftHud.cpp` 里用
+`#if defined(_MSC_VER)` 切到 `_strnicmp`，Linux 侧仍是 `strncasecmp`（名字统一走 `BALLANCE_STRNCASECMP`）。
+同类函数（`strcasestr`、`strdup`、`mmap`）在这台机器上已经踩过两次，写 Player 侧代码时先想一下。
+
 ## 一次完整重建用了多久
 
 从零（D:\bmc 被清空后）：下载 63 MB + scp + 解包 ~2 分钟，configure 22 秒，

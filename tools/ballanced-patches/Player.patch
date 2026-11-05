@@ -1321,10 +1321,10 @@ index 0000000..ab08c82
 +#endif
 diff --git a/src/MinecraftHud.cpp b/src/MinecraftHud.cpp
 new file mode 100644
-index 0000000..f365f7e
+index 0000000..ab20ed0
 --- /dev/null
 +++ b/src/MinecraftHud.cpp
-@@ -0,0 +1,865 @@
+@@ -0,0 +1,872 @@
 +#include "MinecraftHud.h"
 +
 +#include "MinecraftFontAtlas.h"
@@ -1336,7 +1336,14 @@ index 0000000..f365f7e
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
++
++// strncasecmp is POSIX; MSVC has it only as _strnicmp.
++#if defined(_MSC_VER)
++#define BALLANCE_STRNCASECMP _strnicmp
++#else
 +#include <strings.h>
++#define BALLANCE_STRNCASECMP strncasecmp
++#endif
 +
 +namespace {
 +
@@ -1685,13 +1692,13 @@ index 0000000..f365f7e
 +                // prefix and keep the shortest candidate -- "Lifes" (5) wins
 +                // over "LifeBonus" (9), and the per-run "Start*" columns lose.
 +                const size_t length = strlen(name);
-+                if (!strncasecmp(name, "point", 5) && length < pointsLength)
++                if (!BALLANCE_STRNCASECMP(name, "point", 5) && length < pointsLength)
 +                {
 +                    m_PointsColumn = c;
 +                    pointsLength = length;
 +                }
-+                else if (!strncasecmp(name, "startlife", 9)) m_StartLivesColumn = c;
-+                else if (!strncasecmp(name, "life", 4) && length < livesLength)
++                else if (!BALLANCE_STRNCASECMP(name, "startlife", 9)) m_StartLivesColumn = c;
++                else if (!BALLANCE_STRNCASECMP(name, "life", 4) && length < livesLength)
 +                {
 +                    m_LivesColumn = c;
 +                    livesLength = length;
