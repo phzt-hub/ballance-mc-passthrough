@@ -7,8 +7,19 @@
 一句话链路：
 
 ```
-Minecraft 26.3 (Fabric mod)  --glReadPixels-->  /dev/shm/ballance_mc_frame  -->  Ballanced (SDL_GPU) 全屏四边形
+Minecraft 26.3 (Fabric mod)  --glReadPixels-->  邮箱  -->  Ballanced (SDL_GPU) 全屏四边形
 ```
+
+邮箱就是同一块内存，两个平台各用各的拿法：
+
+| | Linux | Windows |
+|---|---|---|
+| 位置 | `/dev/shm/ballance_mc_frame` | `%LOCALAPPDATA%\BallanceMcPassthrough\ballance_mc_frame.dat` |
+| 生产者 | `FileChannel.map` 写 `/dev/shm/...` | 同一个 mod，`FileChannel.map` 写那个 `.dat` |
+| 消费者 | `shm_open` + `mmap` | `CreateFileA` + `CreateFileMapping` + `MapViewOfFile` |
+| 顺序语义 | `__atomic_load_n(acquire)` | `_InterlockedCompareExchange(p,0,0)` |
+
+Windows 上没有 shm 命名空间，所以那边是"内存映射文件"；布局（`mpframe.h`）两边逐字节相同。
 
 ## 协议（`mpframe.h`，两端字节兼容）
 
@@ -37,9 +48,13 @@ Minecraft 26.3 (Fabric mod)  --glReadPixels-->  /dev/shm/ballance_mc_frame  --> 
 | 变量 | 作用 |
 |---|---|
 | `BALLANCE_MC_PASSTHROUGH=1` | 打开消费者（默认关） |
-| `BALLANCE_MC_SHM=名字` | 邮箱名，默认 `ballance_mc_frame` |
+| `BALLANCE_MC_SHM=名字` | 邮箱名，默认 `ballance_mc_frame`（POSIX 侧带不带 `/dev/shm/` 前缀都认） |
+| `BALLANCE_MC_MAILBOX=绝对路径` | 整个路径，两端都认；一般是排查用 |
 | `BALLANCE_MC_EXPORT=0` | （MC 侧）关闭导出 |
 | `BALLANCE_MC_FPS=30` | （MC 侧）导出限速 |
+
+诊断：Linux 侧打在 stderr（`[mc-passthrough] ...`，跟着 `Player.log` 一起）；Windows 没有控制台，
+同一个前缀同时追加进 `Bin\mc-passthrough.log`。
 
 ## 关键设计：无新帧时复用上一次上传的纹理
 
@@ -81,6 +96,21 @@ cd ~/mcmod && ./gradlew25 build && DISPLAY=:99 ./gradlew25 runClient
 
 图案那档（`shmfeed --static --name ballance_test`）证明的是**传输路径本身逐像素精确**：
 左右边带与生产者写入的字节完全一致，中间差的是游戏 UI。
+
+## Windows 真机（2026-11-05 起可用）
+
+源码永远从 Linux 这边取，Windows 只当编译/试玩机：
+
+```sh
+./tools/windows-sync.sh --build --jar --deploy
+```
+
+它会打包 `~/src/Ballanced`（不含 `build/`、`.git`）推过去解包、用计划任务重编、把
+`mc-mod` 的 jar 推进 `D:\bmc-play\mc\mods\`、再把 stage 铺成可玩目录。换一台 Windows 只需
+`BMC_HOST=Administrator@<ip>`。细节和坑见 `docs/windows-build.md`。
+
+试玩顺序：先开 Minecraft（`D:\bmc-play\mc\launch.bat`，进世界或停在菜单都行），再双击
+`D:\bmc-play\run-ballance-mc.bat`（开穿透）或 `run-ballance-plain.bat`（关，对照）。
 
 ## 已知限制
 

@@ -1,8 +1,8 @@
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/CMakeLists.txt b/src/CKRasterizer/CKSdlGpuRasterizer/CMakeLists.txt
-index ff62cbf..ff3d405 100644
+index ff62cbf..0db90b1 100644
 --- a/src/CKRasterizer/CKSdlGpuRasterizer/CMakeLists.txt
 +++ b/src/CKRasterizer/CKSdlGpuRasterizer/CMakeLists.txt
-@@ -14,6 +14,7 @@ set(CKSDL_GPU_RASTERIZER_SOURCES
+@@ -14,9 +14,11 @@ set(CKSDL_GPU_RASTERIZER_SOURCES
      Rasterizer/CKSdlGpuPresentStage.cpp
      Rasterizer/CKSdlGpuRasterizer.cpp
      Rasterizer/CKSdlGpuRasterizerContext.cpp
@@ -10,6 +10,18 @@ index ff62cbf..ff3d405 100644
      Rasterizer/CKSdlGpuRasterizerFFJit.cpp
      Rasterizer/CKSdlGpuRasterizerFrame.cpp
      Rasterizer/CKSdlGpuRasterizerNative.cpp
++    Rasterizer/CKSdlGpuRasterizerPassthrough.cpp
+     Rasterizer/CKSdlGpuRasterizerReadback.cpp
+     Rasterizer/CKSdlGpuRasterizerResources.cpp
+     Rasterizer/CKSdlGpuRasterizerTargets.cpp
+@@ -41,6 +43,7 @@ set(CKSDL_GPU_RASTERIZER_HEADERS
+     Native/CKSdlGpuWorker.h
+     Rasterizer/CKSdlGpuFFJitManifest.h
+     Rasterizer/CKSdlGpuPresentStage.h
++    Rasterizer/CKSdlGpuPassthrough.h
+     Rasterizer/CKSdlGpuRasterizerContext.h
+     Rasterizer/CKSdlGpuShaders.h
+ )
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Native/CKSdlGpuCommands.cpp b/src/CKRasterizer/CKSdlGpuRasterizer/Native/CKSdlGpuCommands.cpp
 index 3a9dd4e..ebd5732 100644
 --- a/src/CKRasterizer/CKSdlGpuRasterizer/Native/CKSdlGpuCommands.cpp
@@ -23,10 +35,18 @@ index 3a9dd4e..ebd5732 100644
      if (Submissions.size() > 3) {
          CKRE_PROFILE_SCOPE("CKRE.SDL.WaitInflight");
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerContext.h b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerContext.h
-index c7588dd..5ace094 100644
+index c7588dd..175c80f 100644
 --- a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerContext.h
 +++ b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerContext.h
-@@ -88,6 +88,9 @@ public:
+@@ -15,6 +15,7 @@
+ #include "CKFFShaderCache.h"
+ #include "CKSdlGpuFFJitManifest.h"
+ #include "CKSdlGpuPresentStage.h"
++#include "CKSdlGpuPassthrough.h"
+ #include "CKSdlGpuRasterizer.h"
+ #include "CKSdlGpuShaders.h"
+ #include "XSHashTable.h"
+@@ -88,6 +89,9 @@ public:
      CKERROR PresentTexture(CKDWORD Texture, CKDWORD Width, CKDWORD Height,
                             CKPresentSync Sync);
      CKERROR Submit(CKPresentSync Sync, CKBOOL PresentWindow, CKDWORD *SubmissionNumber);
@@ -36,6 +56,19 @@ index c7588dd..5ace094 100644
      CKQWORD GetLastSubmitId() const;
      CKQWORD GetCompletedSubmitId();
      CKERROR ReadTexture(CKDWORD Texture, CKDWORD Mip,
+@@ -631,7 +635,12 @@ private:
+     uint64_t m_FFJitIdentity = 0;
+     CKDWORD m_FFJitUses = 0;
+     XSHashTable<CKDWORD, CKDWORD> m_NativeVertexLayouts;
++    // Minecraft frame passthrough: reads the shared memory mailbox and draws
++    // the newest foreign frame inside the overlay pass.
++    friend CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
++                                          CKSdlGpuPassthroughState &State);
+     CKSdlGpuPresentStage m_Present;
++    CKSdlGpuPassthroughState m_Passthrough;
+     // Verbatim fixed-function state mirror.
+ 
+     // Frame
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerDepthDump.cpp b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerDepthDump.cpp
 new file mode 100644
 index 0000000..145fcb1
@@ -269,3 +302,16 @@ index 0000000..145fcb1
 +                             "native-color", (unsigned)Submission);
 +    }
 +}
+diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerFrame.cpp b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerFrame.cpp
+index 08101db..090728e 100644
+--- a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerFrame.cpp
++++ b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerFrame.cpp
+@@ -357,6 +357,8 @@ CKBOOL CKSdlGpuRasterizerContext::BeginOverlayPhase()
+         return FALSE;
+     m_FrameState.Phase = CKFF_FRAME_OVERLAY;
+     UpdateTargetExtents();
++    // Draws the foreign frame over the scene, under the game's 2D interface.
++    CKSdlGpuPassthroughTick(*this, m_Passthrough);
+     return TRUE;
+ }
+ 

@@ -3,8 +3,15 @@
 
 // Ballance <-> Minecraft frame mailbox.
 //
-// The producer (the Minecraft export mod, or tools/passthrough/shmfeed.c while
-// that does not exist yet) owns a POSIX shared memory object laid out as
+// Transport. The object is a POSIX shared memory object on Linux
+// (/dev/shm/<name>) and a memory-mapped file on Windows
+// (%LOCALAPPDATA%/BallanceMcPassthrough/<name>.dat); Windows has no shm
+// namespace. Both halves see each other's writes through the OS page cache, so
+// the layout below is the only thing they have to agree on, and only the mapping
+// call differs (shm_open + mmap against FileChannel.map + CreateFileMapping).
+//
+// The producer (the Fabric mod in ~/mcmod; tools/passthrough/shmfeed.c is the
+// synthetic stand-in) owns a shared memory object laid out as
 //
 //   [ MpFrameHeader ][ slot 0 ][ slot 1 ][ slot 2 ]
 //

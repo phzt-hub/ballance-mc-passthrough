@@ -5,53 +5,62 @@
 // drawn and before the frame is presented. Nothing here knows about geometry,
 // cameras or depth yet: M0 only proves the transport plus one textured quad at
 // an acceptable cost.
+//
+// Transport. Linux reads a POSIX shared memory object (/dev/shm/<name>), Windows
+// reads a memory-mapped file (%LOCALAPPDATA%/BallanceMcPassthrough/<name>.dat)
+// because Windows has no shm namespace. Both transports carry the same mailbox
+// layout, so the producer side is one implementation that only differs in how it
+// maps the bytes (shm_open vs FileChannel.map). Windows guarantees that two views
+// of the same file - even from different section objects - see each other's
+// writes through the file cache, which is all the mailbox needs.
 
 #include "CKSdlGpuPassthrough.h"
 
 #include "CKSdlGpuRasterizerContext.h"
 #include "mpframe.h"
 
-// The mailbox transport below is POSIX shared memory plus GCC atomic builtins, so
-// the Windows build compiles this translation unit down to a no-op tick. That keeps
-// the symbol the render path calls without dragging <sys/mman.h> into MSVC. Nothing
-// else changes: BALLANCE_MC_PASSTHROUGH stays inert on Windows.
-#if defined(_WIN32)
-
-CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
-                               CKSdlGpuPassthroughState &State) {
-    (void)Context;
-    (void)State;
-    return FALSE;
-}
-
-#else
-
-
-#include <fcntl.h>
-#include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
-
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <intrin.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
 constexpr uint32_t kMinExtent = 8;
 constexpr uint32_t kMaxExtent = 8192;
-// The mailbox is retried at this cadence while the producer is absent, and the
+// The mailbox is retried at this cadence while the producer is absent; the
 // statistics line is printed at this cadence once it is present.
 constexpr uint32_t kOpenRetryTicks = 30;
 constexpr int64_t kStatsIntervalMs = 2000;
+// How often the mapping is checked for a producer that restarted or resized.
+constexpr int64_t kStaleCheckMs = 2000;
 
 int64_t now_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    using clock = std::chrono::steady_clock;
+    static const clock::time_point origin = clock::now();
+    return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        clock::now() - origin).count();
 }
+
+void log_sink(const char *line);
 
 void log_line(const char *fmt, ...) {
     char buffer[512];
@@ -59,9 +68,28 @@ void log_line(const char *fmt, ...) {
     va_start(args, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
-    fprintf(stderr, "[mc-passthrough] %s\n", buffer);
+    log_sink(buffer);
+}
+
+#if defined(_WIN32)
+// The Windows build is a windowed process, so the stderr copy is usually
+// swallowed (see Main.cpp: it only opens a console when asked to). Keep an
+// append-only log next to the working directory so a bad first run can be read
+// afterwards; the volume is two lines a second at worst.
+void log_sink(const char *line) {
+    fprintf(stderr, "[mc-passthrough] %s\n", line);
+    fflush(stderr);
+    if (FILE *file = fopen("mc-passthrough.log", "a")) {
+        fprintf(file, "[mc-passthrough] %s\n", line);
+        fclose(file);
+    }
+}
+#else
+void log_sink(const char *line) {
+    fprintf(stderr, "[mc-passthrough] %s\n", line);
     fflush(stderr);
 }
+#endif
 
 CKBOOL env_flag(const char *name) {
     const char *value = getenv(name);
@@ -71,18 +99,115 @@ CKBOOL env_flag(const char *name) {
     return TRUE;
 }
 
+// Acquire load of a header word. The producer fills a slot, then stores
+// PublishedSlot, then bumps FrameId with release semantics; everything this
+// consumer reads after the acquire must come after it in program order.
+uint32_t load_acquire(const uint32_t *field) {
+#if defined(_MSC_VER)
+    // MSVC has no __atomic builtins and the build is C++17, so atomic_ref is not
+    // available either. InterlockedCompareExchange against an unchanged value is
+    // an acquire barrier and an atomic 32-bit load.
+    return (uint32_t)_InterlockedCompareExchange(
+        reinterpret_cast<volatile LONG *>(const_cast<uint32_t *>(field)), 0, 0);
+#else
+    return __atomic_load_n(field, __ATOMIC_ACQUIRE);
+#endif
+}
+
+// Resolves the mailbox the same way the producer does. The name comes from
+// BALLANCE_MC_SHM (default "ballance_mc_frame"); BALLANCE_MC_MAILBOX replaces the
+// whole path (a file path on Windows, a /dev/shm path on POSIX).
+void resolve_path(CKSdlGpuPassthroughState &state) {
+    const char *name = getenv("BALLANCE_MC_SHM");
+    if (!name || !*name) name = "ballance_mc_frame";
+    const char *explicit_path = getenv("BALLANCE_MC_MAILBOX");
+    const bool has_explicit = explicit_path && *explicit_path;
+#if defined(_WIN32)
+    if (has_explicit) {
+        snprintf(state.Path, sizeof(state.Path), "%s", explicit_path);
+        return;
+    }
+    char base[MAX_PATH * 2] = {};
+    DWORD length = GetEnvironmentVariableA("LOCALAPPDATA", base, (DWORD)sizeof(base));
+    if (length == 0 || length >= sizeof(base)) {
+        length = GetEnvironmentVariableA("TEMP", base, (DWORD)sizeof(base));
+        if (length == 0 || length >= sizeof(base)) snprintf(base, sizeof(base), ".");
+    }
+    snprintf(state.Path, sizeof(state.Path), "%s\\BallanceMcPassthrough\\%s.dat", base, name);
+#else
+    // shm_open wants an object name such as "/ballance_mc_frame", not a path, so
+    // the /dev/shm prefix is stripped from an explicit path and kept only for the
+    // log line. BALLANCE_MC_SHM may carry either form.
+    const char *shm_name = has_explicit ? explicit_path : name;
+    if (!strncmp(shm_name, "/dev/shm/", 9)) shm_name += 9;
+    if (*shm_name == '/') {
+        snprintf(state.ShmName, sizeof(state.ShmName), "%s", shm_name);
+        snprintf(state.Path, sizeof(state.Path), "/dev/shm%s", shm_name);
+    } else {
+        snprintf(state.ShmName, sizeof(state.ShmName), "/%s", shm_name);
+        snprintf(state.Path, sizeof(state.Path), "/dev/shm/%s", shm_name);
+    }
+#endif
+}
+
+// What the log lines call the mailbox: the file path on Windows, the shared
+// memory object name on POSIX (the same string the M0 docs and tests quote).
+const char *mailbox_label(const CKSdlGpuPassthroughState &state) {
+#if defined(_WIN32)
+    (void)state.ShmName;
+    return state.Path;
+#else
+    return state.ShmName;
+#endif
+}
+
 void initialise(CKSdlGpuPassthroughState &state) {
     state.Initialised = TRUE;
     state.Enabled = env_flag("BALLANCE_MC_PASSTHROUGH");
-    const char *name = getenv("BALLANCE_MC_SHM");
-    if (!name || !*name) name = "ballance_mc_frame";
-    if (*name == '/')
-        snprintf(state.Path, sizeof(state.Path), "%s", name);
-    else
-        snprintf(state.Path, sizeof(state.Path), "/%s", name);
+    resolve_path(state);
     state.StartMs = now_ms();
     if (state.Enabled)
-        log_line("enabled, mailbox %s", state.Path);
+        log_line("enabled, mailbox %s (%s)", mailbox_label(state), state.Path);
+}
+
+// Releases the mapping without touching the cached texture: the producer may
+// come back with a new size, and the last frame stays on screen meanwhile.
+void release_mailbox(CKSdlGpuPassthroughState &state) {
+    if (!state.Mapped) return;
+#if defined(_WIN32)
+    if (state.Base) UnmapViewOfFile(state.Base);
+    if (state.FileHandle) CloseHandle(static_cast<HANDLE>(state.FileHandle));
+    state.FileHandle = nullptr;
+#else
+    if (state.Base) munmap(state.Base, state.Bytes);
+    if (state.Fd >= 0) close(state.Fd);
+    state.Fd = -1;
+#endif
+    state.Base = nullptr;
+    state.Bytes = 0;
+    state.Mapped = FALSE;
+    state.LastFrameId = 0;
+    // Retry on the very next tick instead of waiting out the open backoff.
+    state.OpenAttempts = 0;
+    log_line("mailbox %s released", mailbox_label(state));
+}
+
+// TRUE when the mapping no longer points at what the producer is writing: the
+// producer unlinks and recreates the mailbox whenever the frame size changes, and
+// an unlinked object keeps the old bytes visible through the existing view.
+CKBOOL mailbox_stale(CKSdlGpuPassthroughState &state) {
+    if (!state.Mapped) return FALSE;
+#if defined(_WIN32)
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(static_cast<HANDLE>(state.FileHandle), &info)) return TRUE;
+    const uint64_t size =
+        ((uint64_t)info.nFileSizeHigh << 32) | (uint64_t)info.nFileSizeLow;
+    return info.nNumberOfLinks == 0 || size != (uint64_t)state.Bytes;
+#else
+    struct stat info;
+    if (fstat(state.Fd, &info) != 0) return TRUE;
+    return info.st_nlink == 0 || (size_t)info.st_size != state.Bytes;
+#endif
 }
 
 // Maps the mailbox if the producer has created it. Cheap enough to retry, but
@@ -92,11 +217,53 @@ CKBOOL try_map(CKSdlGpuPassthroughState &state) {
     if (state.OpenAttempts > 0 && (state.Ticks % kOpenRetryTicks) != 0) return FALSE;
     ++state.OpenAttempts;
 
-    const int fd = shm_open(state.Path, O_RDONLY, 0);
+#if defined(_WIN32)
+    HANDLE handle = CreateFileA(state.Path, GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        if (!state.ReportedMissing) {
+            state.ReportedMissing = TRUE;
+            log_line("waiting for %s (producer not running yet, error %lu)", state.Path,
+                     (unsigned long)GetLastError());
+        }
+        return FALSE;
+    }
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(handle, &size) || (uint64_t)size.QuadPart < MPF_HEADER_BYTES) {
+        CloseHandle(handle);
+        if (!state.ReportedBadHeader) {
+            state.ReportedBadHeader = TRUE;
+            log_line("%s is smaller than the header (%lld bytes)", state.Path,
+                     (long long)size.QuadPart);
+        }
+        return FALSE;
+    }
+    HANDLE section = CreateFileMappingA(handle, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!section) {
+        log_line("CreateFileMapping %s failed (error %lu)", state.Path,
+                 (unsigned long)GetLastError());
+        CloseHandle(handle);
+        return FALSE;
+    }
+    // The view keeps the section alive, so the section handle goes right away.
+    void *base = MapViewOfFile(section, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(section);
+    if (!base) {
+        log_line("MapViewOfFile %s failed (error %lu)", state.Path,
+                 (unsigned long)GetLastError());
+        CloseHandle(handle);
+        return FALSE;
+    }
+    state.FileHandle = handle;
+    state.Base = base;
+    state.Bytes = (size_t)size.QuadPart;
+#else
+    const int fd = shm_open(state.ShmName, O_RDONLY, 0);
     if (fd < 0) {
         if (!state.ReportedMissing) {
             state.ReportedMissing = TRUE;
-            log_line("waiting for %s (producer not running yet)", state.Path);
+            log_line("waiting for %s (producer not running yet)", mailbox_label(state));
         }
         return FALSE;
     }
@@ -105,7 +272,7 @@ CKBOOL try_map(CKSdlGpuPassthroughState &state) {
         close(fd);
         if (!state.ReportedBadHeader) {
             state.ReportedBadHeader = TRUE;
-            log_line("%s is smaller than the header (%lld bytes)", state.Path,
+            log_line("%s is smaller than the header (%lld bytes)", mailbox_label(state),
                      (long long)info.st_size);
         }
         return FALSE;
@@ -118,9 +285,12 @@ CKBOOL try_map(CKSdlGpuPassthroughState &state) {
     state.Fd = fd;
     state.Base = base;
     state.Bytes = (size_t)info.st_size;
+#endif
     state.Mapped = TRUE;
     state.ReportedMissing = FALSE;
-    log_line("mapped %s (%zu bytes)", state.Path, state.Bytes);
+    state.ReportedBadHeader = FALSE;
+    state.LastStaleCheckMs = now_ms();
+    log_line("mapped %s (%zu bytes)", mailbox_label(state), state.Bytes);
     return TRUE;
 }
 
@@ -186,10 +356,19 @@ CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
     if (!State.Initialised) initialise(State);
     if (!State.Enabled) return FALSE;
     ++State.Ticks;
+
+    // A producer that restarted (or resized the window) leaves this view on an
+    // orphaned object. Drop it and pick the new one up on the next tick; the
+    // cached texture keeps presenting the last frame meanwhile.
+    const int64_t now = now_ms();
+    if (State.Mapped && now - State.LastStaleCheckMs >= kStaleCheckMs) {
+        State.LastStaleCheckMs = now;
+        if (mailbox_stale(State)) release_mailbox(State);
+    }
     if (!try_map(State)) return FALSE;
 
     const MpFrameHeader *header = static_cast<const MpFrameHeader *>(State.Base);
-    const uint32_t frameId = __atomic_load_n(&header->FrameId, __ATOMIC_ACQUIRE);
+    const uint32_t frameId = load_acquire(&header->FrameId);
     if (frameId == 0 || frameId == State.LastFrameId) {
         if (!State.HasContent || !State.Texture) {
             ++State.Misses;
@@ -208,7 +387,7 @@ CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
         log_stats(State);
         return again == CK_OK ? TRUE : FALSE;
     }
-    if (__atomic_load_n(&header->Magic, __ATOMIC_ACQUIRE) != MPF_MAGIC ||
+    if (load_acquire(&header->Magic) != MPF_MAGIC ||
         header->Version != MPF_VERSION) {
         if (!State.ReportedBadHeader) {
             State.ReportedBadHeader = TRUE;
@@ -222,7 +401,7 @@ CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
     const uint32_t width = header->Width;
     const uint32_t height = header->Height;
     const uint32_t stride = header->Stride;
-    const uint32_t slot = __atomic_load_n(&header->PublishedSlot, __ATOMIC_ACQUIRE);
+    const uint32_t slot = load_acquire(&header->PublishedSlot);
     if (width < kMinExtent || height < kMinExtent || width > kMaxExtent ||
         height > kMaxExtent || header->Format != MPF_FORMAT_BGRA8 ||
         stride < width * 4u || slot >= MPF_SLOTS) {
@@ -269,5 +448,3 @@ CKBOOL CKSdlGpuPassthroughTick(CKSdlGpuRasterizerContext &Context,
     log_stats(State);
     return drawn == CK_OK ? TRUE : FALSE;
 }
-
-#endif // _WIN32

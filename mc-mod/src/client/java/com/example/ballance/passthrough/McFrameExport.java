@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
@@ -15,6 +16,7 @@ import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -22,14 +24,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Every rendered frame this class hands the main render target to Minecraft's own
  * screenshot readback path, converts the resulting RGBA image into the BGRA layout the
- * mailbox specifies and publishes it into a POSIX shared memory object. The layout is
+ * mailbox specifies and publishes it into a mailbox the Ballance side maps. The layout is
  * documented in {@code tools/passthrough/mpframe.h} of the ballance-mc-passthrough
  * repository and is byte compatible with the synthetic producer (shmfeed.c) used while
  * this module did not exist.
  *
+ * <p>The transport differs per platform, only because the OS does. On Linux the mailbox is
+ * a file under {@code /dev/shm} (a POSIX shared memory object from the Ballance side). On
+ * Windows, which has no shm namespace, it is a memory-mapped file in
+ * {@code %LOCALAPPDATA%\BallanceMcPassthrough\}. The consumer resolves the same path
+ * independently ({@code sdlgpu-passthrough.cpp}, {@code resolve_path}) and the two halves
+ * see each other's writes through the page cache, so nothing else changes.
+ *
  * <p>Configuration (environment):
  * <ul>
  *   <li>{@code BALLANCE_MC_SHM}  mailbox name, default {@code ballance_mc_frame};</li>
+ *   <li>{@code BALLANCE_MC_MAILBOX} absolute mailbox path, overrides the name;</li>
  *   <li>{@code BALLANCE_MC_FPS}  target publish rate, default 30, 0 = every frame;</li>
  *   <li>{@code BALLANCE_MC_EXPORT} set to {@code 0} to disable the export entirely.</li>
  * </ul>
@@ -94,10 +104,7 @@ public final class McFrameExport {
         if (name == null || name.isEmpty()) {
             name = "ballance_mc_frame";
         }
-        if (!name.startsWith("/")) {
-            name = "/" + name;
-        }
-        mailboxPath = "/dev/shm" + name;
+        mailboxPath = resolveMailboxPath(name);
         int fps = 30;
         String fpsValue = System.getenv("BALLANCE_MC_FPS");
         if (fpsValue != null && !fpsValue.isEmpty()) {
@@ -111,6 +118,31 @@ public final class McFrameExport {
         statsSinceNanos = System.nanoTime();
         LOGGER.info("frame export {} (mailbox {}, target {} fps)", enabled ? "enabled" : "disabled",
                 mailboxPath, fps > 0 ? fps : "every");
+    }
+
+    /**
+     * Resolves the mailbox path exactly the way the Ballance-side consumer does
+     * ({@code resolve_path} in sdlgpu-passthrough.cpp). {@code BALLANCE_MC_MAILBOX} wins;
+     * otherwise the name is a {@code /dev/shm} object on Linux and a file under
+     * {@code %LOCALAPPDATA%\BallanceMcPassthrough} on Windows, which has no shm namespace.
+     */
+    private static String resolveMailboxPath(String name) {
+        String explicitPath = System.getenv("BALLANCE_MC_MAILBOX");
+        if (explicitPath != null && !explicitPath.isEmpty()) {
+            return explicitPath;
+        }
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.contains("win")) {
+            String base = System.getenv("LOCALAPPDATA");
+            if (base == null || base.isEmpty()) {
+                base = System.getenv("TEMP");
+            }
+            if (base == null || base.isEmpty()) {
+                base = System.getProperty("java.io.tmpdir");
+            }
+            return new File(new File(base, "BallanceMcPassthrough"), name + ".dat").getAbsolutePath();
+        }
+        return "/dev/shm" + (name.startsWith("/") ? name : "/" + name);
     }
 
     /**
@@ -207,6 +239,10 @@ public final class McFrameExport {
         long total = HEADER_BYTES + slotBytes * SLOTS;
         try {
             File file = new File(mailboxPath);
+            File parent = file.getParentFile();
+            if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                throw new IOException("cannot create mailbox directory " + parent);
+            }
             if (file.exists() && !file.delete()) {
                 LOGGER.warn("cannot replace stale mailbox {}", mailboxPath);
             }
