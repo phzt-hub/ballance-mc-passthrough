@@ -29,7 +29,9 @@
 | PoC-2 | 动态 obstacle 加/删 + 球能撞上 | 球被自己加的盒子挡住 |
 | M0 | 共享内存链路 + 全屏贴图 | Ballance 窗口里看到 MC 画面 |
 | M1 🔄 | 相机 + 球位 = Steve 位 | 球滚，MC 世界跟着走不漂 —— 数据通路已通（阀门见 [docs/m1-camera.md](docs/m1-camera.md)），客户端内应用待实拍 |
-| M2 | 深度合成（重投影） | 柱子能挡住 MC 的墙 |
+| **M2a** ✅ | 虚空世界 + 去天空（MC 侧） | MC 那一帧只剩方块/实体，背景 alpha=0（[docs/mc-void-world.md](docs/mc-void-world.md)） |
+| M2b | Ballance 侧开 alpha 混合 | 球道从 MC 帧的透明处透出来 |
+| M2c | 深度合成（重投影） | 柱子能挡住 MC 的墙 |
 | M3a | 输入转发 | 摆方块、点 TNT、点苦力怕 |
 | M3b | 地面 raycast | Steve 站在球道上不穿模 |
 | M3c | 方块 → 碰撞体 | **球能撞上你搭的墙** |
@@ -41,6 +43,12 @@
 MC 侧读端实测解算正确（eye/朝向/FOV/球位），相机接管代码已写、未在真实客户端里看到画面。
 坑与数字全在 [docs/m1-camera.md](docs/m1-camera.md)。
 
+**M2a 进度（2026-11-06）**：MC 侧三件事做完了——启动自动建/开虚空存档 `passthrough`、
+去天空/云/天气、读回时保留 alpha。实测（Xvfb :99，854x480）帧里 **87.6% 的像素 alpha=0**，
+剩下的只有快捷栏、准星和第一人称手臂。注意 Ballance 侧现在还是「贴一张不透明的图」，
+要看到透明效果还得开合成时的 alpha 混合（M2b）。细节与五个坑见
+[docs/mc-void-world.md](docs/mc-void-world.md)。
+
 **已知问题（2026-11-05）**：穿透开着且 `Hud=1` 时，MC 帧自带的 HUD 与 Ballance 侧手搓的
 准星/快捷栏/心会**叠成两套**。没修 —— 决定是先不动、等 M1/M2 到位后由 MC 帧接管，
 理由与收法见 [docs/mc-hud.md](docs/mc-hud.md)。
@@ -50,6 +58,7 @@ MC 侧读端实测解算正确（eye/朝向/FOV/球位），相机接管代码�
 ```
 docs/feasibility.md        PoC-0 的证据与结论（Ballanced / SDL3 路线）
 docs/bmlplus-hooks.md      BML+ 钩子能力核查（路线 A′：BallancePlayer + BML+）
+docs/mc-void-world.md      M2a：虚空世界 + 去天空（五个坑 + 透明度实测）
 docs/level-parse.md        离线读关卡几何：已跑通，含三个坑与矩阵约定
 docs/scale-calibration.md  尺度标定表（球 / 物理件 / 13 关走廊宽 / 方块比例）
 docs/windows-build.md      Windows 真机试玩包怎么编（工具链 / 三个坑 / 铺目录）

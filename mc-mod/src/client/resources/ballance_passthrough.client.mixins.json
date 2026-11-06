@@ -6,7 +6,10 @@
 	"client": [
 		"MinecraftFrameMixin",
 		"MinecraftTickMixin",
-		"CameraMixin"
+		"CameraMixin",
+		"LevelRendererMixin",
+		"CloudRendererMixin",
+		"WeatherEffectRendererMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -52,6 +52,13 @@ Ball_Wood/Stone/Paper，再看包围盒是不是 4×4×4，最后看它离视线
 
 ### 3. 本机的无头 MC 进不了世界
 
+> **2026-11-06 更正**：这条结论是错的，原因是当时用的存档 `m1test` 只有一个
+> `session.lock`、`level.dat` 已经没了，`openWorld` 静默落到了
+> `RecoverWorldDataScreen`。换一个完整存档后无头 MC **能**进世界（世界加载 →
+> `Server thread` 起来 → `CameraSync` 每 tick 应用位姿），实测见
+> [docs/mc-void-world.md](mc-void-world.md) 的坑 1。下面保留原始记录，但"进不了世界"
+> 这个判断作废。
+
 这不是 M1 的代码问题，是环境：
 
 - --args 传不进 runClient：loom 把程序参数写进 argfile，Gradle 的 --args 被丢掉，

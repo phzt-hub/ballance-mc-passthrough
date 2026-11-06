@@ -1,9 +1,11 @@
 package com.example.ballance.passthrough;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.platform.NativeImage;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice.MappedView;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Screenshot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -94,6 +96,13 @@ public final class McFrameExport {
     private static int skipped;
     private static int failures;
     private static long statsSinceNanos;
+
+    /**
+     * 透明度统计：这一段时间里有多少像素的 alpha 是 0。这是「背景透明」这件事唯一
+     * 客观的数字——虚空世界里没有人放方块时它应该接近 100%，有方块时才掉下来。
+     */
+    private static long backgroundZeros;
+    private static long backgroundSamples;
 
     /**
      * How much of the pipeline to run. Production is {@link #STAGE_FULL}; the other
@@ -267,19 +276,52 @@ public final class McFrameExport {
         }
         trace("request " + target.width + "x" + target.height + where());
         try {
-            Screenshot.takeScreenshot(target, 1, McFrameExport::publish);
-            trace("request handed to Screenshot");
+            capture(target);
+            trace("request handed to the readback");
         } catch (Throwable throwable) {
             IN_FLIGHT.set(false);
             noteFailure(throwable);
         }
     }
 
-    private static void publish(NativeImage image) {
+    /**
+     * 把主渲染目标读回内存。
+     *
+     * <p><b>不用 {@code Screenshot.takeScreenshot}</b>：它的最后一步是
+     * {@code image.setPixelABGR(x, y, argb | 0xFF000000)}——alpha 被写死成 255。
+     * 那是给人看的截图，对我们正好把唯一重要的通道抹掉（2026-11-06 实测：帧里
+     * 100% 的像素 a=255，而清屏色明明是 alpha 0）。这里照抄它的读回流程，
+     * 只去掉那个或运算。
+     */
+    private static void capture(RenderTarget target) {
+        final GpuTexture source = target.getColorTexture();
+        final int frameWidth = target.width;
+        final int frameHeight = target.height;
+        final int blockSize = source.getFormat().blockSize();
+        final GpuBuffer buffer = RenderSystem.getDevice()
+                .createBuffer(() -> "ballance-passthrough-frame", 9, (long) frameWidth * frameHeight * blockSize);
+        RenderSystem.getDevice()
+                .createCommandEncoder()
+                .copyTextureToBuffer(source, buffer, 0L, () -> {
+                    try (MappedView read = buffer.map(true, false)) {
+                        publishRows(read.data(), frameWidth, frameHeight, blockSize);
+                    } catch (Throwable throwable) {
+                        noteFailure(throwable);
+                    } finally {
+                        buffer.close();
+                        IN_FLIGHT.set(false);
+                    }
+                }, 0);
+    }
+
+    /**
+     * 把读回的一帧写进信箱。{@code data} 是纹理原样的行优先字节（每像素
+     * {@code blockSize} 字节、R,G,B,A 顺序、**第一行是画面最下面一行**——GL 的约定），
+     * 所以这里同时做上下翻转和 R/B 交换，alpha 原样保留。
+     */
+    private static void publishRows(ByteBuffer data, int frameWidth, int frameHeight, int blockSize) {
         trace("publish enter" + where());
-        try (NativeImage frame = image) {
-            int frameWidth = frame.getWidth();
-            int frameHeight = frame.getHeight();
+        try {
             trace("publish image " + frameWidth + "x" + frameHeight);
             if (frameWidth < 8 || frameHeight < 8) {
                 return;
@@ -309,21 +351,16 @@ public final class McFrameExport {
                 trace("publish stage2 done slot=" + slot);
                 return;
             }
-            ByteBuffer source = frame.getPixelBytes().order(ByteOrder.LITTLE_ENDIAN);
-            IntBuffer pixels = source.asIntBuffer();
-            trace("publish bytes cap=" + source.capacity() + " pixels=" + pixels.capacity() + " direct="
-                    + source.isDirect());
+            final ByteBuffer source = data.order(ByteOrder.LITTLE_ENDIAN);
+            trace("publish bytes cap=" + source.capacity() + " pixels=" + count + " blockSize=" + blockSize);
             if (stage == STAGE_HEAP) {
                 if (heapScratch == null || heapScratch.length != count) {
                     heapScratch = new int[count];
                 }
-                copy(pixels, heapScratch, 0, count, null);
+                copy(source, frameWidth, frameHeight, blockSize, heapScratch, 0, null);
                 trace("publish stage4 heap copy done");
             } else {
-                // NativeImage memory is R,G,B,A; the mailbox wants B,G,R,A. Both views are
-                // little endian so one integer holds A<<24 | B<<16 | G<<8 | R and the swap is
-                // a pair of shifts on the red and blue bytes.
-                copy(pixels, null, target, count, mapInts);
+                copy(source, frameWidth, frameHeight, blockSize, null, target, mapInts);
             }
             VarHandle.storeStoreFence();
             trace("publish fence");
@@ -342,24 +379,42 @@ public final class McFrameExport {
     }
 
     /**
-     * Swaps red and blue while copying, in quarter-sized chunks so the breadcrumb log can
-     * say how far a run got before the host died.
+     * 翻转 + 换通道 + 数 alpha，按行推进，好让面包屑日志能说出跑到第几行。
+     *
+     * <p>纹理里一个像素是 R,G,B,A 四个字节；信箱要 B,G,R,A。小端读成一个 int 就是
+     * A&lt;&lt;24 | B&lt;&lt;16 | G&lt;&lt;8 | R，交换只是 R 和 B 两个字节的位移。
+     * <b>alpha 一律原样搬运</b>——它就是「背景透不透明」的全部信息。
      */
-    private static void copy(IntBuffer source, int[] heap, int mailboxBase, int count, IntBuffer mailbox) {
-        int quarter = Math.max(1, count / 4);
-        for (int base = 0; base < count; base += quarter) {
-            int end = Math.min(count, base + quarter);
-            for (int i = base; i < end; i++) {
-                int argb = source.get(i);
-                int bgra = (argb & 0xFF00FF00) | ((argb & 0xFF) << 16) | ((argb >>> 16) & 0xFF);
-                if (mailbox != null) {
-                    mailbox.put(mailboxBase + i, bgra);
-                } else {
-                    heap[i] = bgra;
+    private static void copy(ByteBuffer source, int frameWidth, int frameHeight, int blockSize,
+                             int[] heap, int mailboxBase, IntBuffer mailbox) {
+        final int count = frameWidth * frameHeight;
+        final int rowsPerStep = Math.max(1, frameHeight / 8);
+        long zeros = 0;
+        for (int rowBase = 0; rowBase < frameHeight; rowBase += rowsPerStep) {
+            int rowEnd = Math.min(frameHeight, rowBase + rowsPerStep);
+            for (int y = rowBase; y < rowEnd; y++) {
+                // 输出第 y 行（自上而下）来自纹理第 (frameHeight - 1 - y) 行（自下而上）
+                int sourceRow = frameHeight - 1 - y;
+                int sourceBase = sourceRow * frameWidth * blockSize;
+                int targetBase = y * frameWidth;
+                for (int x = 0; x < frameWidth; x++) {
+                    int argb = source.getInt(sourceBase + x * blockSize);
+                    if ((argb >>> 24) == 0) {
+                        ++zeros;
+                    }
+                    int bgra = (argb & 0xFF00FF00) | ((argb & 0xFF) << 16) | ((argb >>> 16) & 0xFF);
+                    int i = targetBase + x;
+                    if (mailbox != null) {
+                        mailbox.put(mailboxBase + i, bgra);
+                    } else {
+                        heap[i] = bgra;
+                    }
                 }
             }
-            trace("copied " + end + "/" + count);
+            trace("copied rows " + rowEnd + "/" + frameHeight);
         }
+        backgroundZeros += zeros;
+        backgroundSamples += count;
     }
 
     private static boolean ensureMailbox(int frameWidth, int frameHeight) {
@@ -429,12 +484,17 @@ public final class McFrameExport {
             return;
         }
         long seconds = Math.max(1L, (now - statsSinceNanos) / 1_000_000_000L);
-        LOGGER.info("published {} frames in {}s (~{} fps), skipped {}, failures {}",
-                published, seconds, published / seconds, skipped, failures);
+        String background = backgroundSamples > 0
+                ? String.format(Locale.ROOT, "%.1f%%", 100.0 * backgroundZeros / backgroundSamples)
+                : "n/a";
+        LOGGER.info("published {} frames in {}s (~{} fps), skipped {}, failures {}, transparent {}",
+                published, seconds, published / seconds, skipped, failures, background);
         statsSinceNanos = now;
         published = 0;
         skipped = 0;
         failures = 0;
+        backgroundZeros = 0;
+        backgroundSamples = 0;
     }
 
     private static void noteFailure(Throwable throwable) {
