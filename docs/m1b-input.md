@@ -118,7 +118,17 @@ tools/passthrough/test-m1b.sh <tag> 12
 | 物品格 第 2 行第 5 列 | (205, 96) | (307, 192) |
 | 快捷栏 0 / 1 | (133, 172) / (151, 172) | (199, 344) / (227, 344) |
 
-## 七、已知边界
+## 七、截图（`docs/m1b-shots/`）
+
+| 文件 | 内容 |
+|---|---|
+| `inventory-open.png` | E 打开的创造物品栏，默认页签 Building Blocks |
+| `tab-natural-blocks.png` | 点第三个页签之后，标题变成 Natural Blocks |
+| `hotbar-placed.png` | 点过物品、再点快捷栏第 1 格：一块红沙已经在格子里，tooltip 跟着指针 |
+| `scrolled.png` | 滚轮往下三格之后的同一页 |
+| `crosshair.png` | 关掉物品栏回到关卡，准星在球上方 |
+
+## 八、已知边界
 
 - 只在 Linux/Xvfb 上跑过；Windows 真机未验证（事件源同样是 SDL，编号应当一致，但没有实测）。
 - 按住左键拖动（分堆/铺满）走 `screen.mouseDragged`，没有做自动化验收。
