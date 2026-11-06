@@ -130,5 +130,6 @@ MC 拿它摆自己的相机。开关 `BALLANCE_MC_CAMERA=1`，协议 `mpcamera.h
 * 只做铺满全屏的拉伸（854x480 → 640x480 会横向压扁），还没有等比/裁切选项。
 * M1（相机同步）：Ballance → MC 的反向通道已通（`inspect-camera.py` 可独立读，Java 读端实测解算正确），
   MC 客户端里的应用待实拍；M2（深度重投影）未做。细节与坑见 [docs/m1-camera.md](../../docs/m1-camera.md)。
-* 传的是 MC 的**整帧**，含它自己的 HUD；Ballance 侧 `MinecraftHud` 手搓的准星/快捷栏/心与之重复，
-  两个都开会叠出两套。已知未修（决策 C），收法见 `docs/mc-hud.md` 「归属」一节。
+* 传的是 MC 的**整帧**，含它自己的 HUD（准星、快捷栏、手臂）。Ballance 侧曾手搓过一套同款，
+  2026-11-06 已删——两套叠着只是重影。
+* 只有 alpha 合成，没有深度：Ballance 的柱子挡不住 MC 的墙（M2 的另一半没做）。

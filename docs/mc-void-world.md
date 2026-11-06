@@ -127,10 +127,48 @@ image.setPixelABGR(x, height - y - 1, argb | 0xFF000000);   // ← 这里
 棋盘格那张是把 alpha 当遮罩铺在棋盘上：**棋盘露出来的地方就是透明的**。
 右下角那团粉色是第一人称手臂，底下是快捷栏，中间是准星。
 
-## 五、还没做（下一步）
+## 五、合成：alpha 混合（2026-11-06 补上）
 
-1. **Ballance 侧的合成还是「贴一张不透明的图」**：`sdlgpu-passthrough.cpp` 给纹理标了
-   `CKRST_TEXTURE_ALPHA`，但绘制时没开 alpha 混合。结果是现在把 MC 帧贴上去看到的
-   是「雾色 RGB + HUD」，不是「只有方块」。开混合是 Ballance 侧的第一件事。
-2. MC 自己的 HUD 还在帧里（和 Ballance 手搓的那套叠着，见 docs/mc-hud.md 的已知问题）。
-   按既定决定，最终由 MC 帧接管 HUD，那时要把 Ballance 侧那套关掉。
+上面说的「贴一张不透明的图」已经修掉。位置在 present stage，不在 passthrough 自己身上：
+
+* `CKFFPresentDraw::Prepare` 多一个 `AlphaBlend` 参数，`SubmitCopy`（贴 MC 帧）传 `TRUE`，
+  `Submit` / `SubmitBlit`（resolve、blit）传 `FALSE`。
+* 混合因子：颜色 `VXBLEND_SRCALPHA / VXBLEND_INVSRCALPHA`，alpha 通道单独给
+  `VXBLEND_ONE / VXBLEND_INVSRCALPHA`——帧里的 alpha 是直通值，不做预乘。
+* 纹理本来就按 `CKRST_TEXTURE_RGB | CKRST_TEXTURE_ALPHA` 建、`_32_ARGB8888` 上传，
+  所以 alpha 一路没丢，缺的只是 pipeline 状态里那个混合位（`CKDrawStateBuilder` 默认不混合）。
+
+于是 alpha=0 的地方让位给 Ballance 的场景。**没有深度**：Ballance 的柱子挡不住 MC 的墙，
+那要等 M2 的重投影。
+
+同时删掉 Ballance 侧手搓的 HUD（`MinecraftHud.*`，约 780 行，外加面板里的 Hud / HudScale 两行）：
+帧里自带的准星/快捷栏/心/手臂一直是真的，两套叠着只是重影。
+
+## 六、合成实测（2026-11-06，Level 08）
+
+![关卡 8 的合成](m2b-shots/lvl8-composite.png)
+
+跑法（两万多次调用里唯一能复现的一条）：
+
+1. 先起 MC 客户端（虚空存档 `passthrough` 自动开），再起 Ballance：
+   `BALLANCE_MC_PASSTHROUGH=1 BALLANCE_MC_CAMERA=1 BALLANCE_MC_STEVE=0 BALLANCE_MC_STEVE_FP=0`。
+   关掉 Steve 的相机是为了拿到游戏自己的 `InGameCam`（第三人称跟球），画面里才有赛道。
+2. 主菜单点 `CREDITS` → 键盘输入 `gravity`（原作彩蛋）→ 解锁全部关卡 → `BACK` → `START`。
+   新开档只有第 1 关可选，其余关卡点了没反应；这条彩蛋是唯一不用通关就能进第 8 关的路。
+3. 点 `LEVEL 8`，等 12 秒让球落地。
+
+两个坑：
+
+* **xdotool 的 `click` 不够**：指针要分十来步移动过去再按，否则游戏里的悬停/点击还停在旧位置——
+  表现就是「点 CREDITS 没反应，OPTIONS 却亮着」。脚本见 `tools/passthrough/enter-level-8.sh`。
+* 关卡列表里 `DB_Levelfreischaltung`（12 行 `Freigeschaltet?`）是解锁状态，但直接把它全置 1
+  **不生效**：按钮的激活状态在菜单初始化时就定了（`Menu_Start_ShowHide` 的 `Activate?`），
+  改数组只对下一次菜单初始化有效。彩蛋走的就是游戏自己的初始化路径。
+
+这次抓到的帧（`tools/passthrough/inspect-mailbox.py`）：854x480，`a=0` **87.48%**，
+`64<=a<255` 2.25%，`a=255` 10.27%（快捷栏 + 手臂 + 右上角提示）。Ballance 侧 4 fps 消费
+（MC 客户端这时只有 ~5 fps，llvmpipe 软渲染）。
+
+菜单上的合成更直观——MC 的方块（箱子、石台、火把）盖在 Ballance 的选关界面上：
+
+![选关界面上的合成](m2b-shots/menu-composite.png)

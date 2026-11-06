@@ -43,15 +43,11 @@
 MC 侧读端实测解算正确（eye/朝向/FOV/球位），相机接管代码已写、未在真实客户端里看到画面。
 坑与数字全在 [docs/m1-camera.md](docs/m1-camera.md)。
 
-**M2a 进度（2026-11-06）**：MC 侧三件事做完了——启动自动建/开虚空存档 `passthrough`、
-去天空/云/天气、读回时保留 alpha。实测（Xvfb :99，854x480）帧里 **87.6% 的像素 alpha=0**，
-剩下的只有快捷栏、准星和第一人称手臂。注意 Ballance 侧现在还是「贴一张不透明的图」，
-要看到透明效果还得开合成时的 alpha 混合（M2b）。细节与五个坑见
-[docs/mc-void-world.md](docs/mc-void-world.md)。
-
-**已知问题（2026-11-05）**：穿透开着且 `Hud=1` 时，MC 帧自带的 HUD 与 Ballance 侧手搓的
-准星/快捷栏/心会**叠成两套**。没修 —— 决定是先不动、等 M1/M2 到位后由 MC 帧接管，
-理由与收法见 [docs/mc-hud.md](docs/mc-hud.md)。
+**M2b 进度（2026-11-06）**：Ballance 侧那张 MC 画面现在**按 alpha 合成**，不再是一张贴死的
+不透明图——MC 帧里透明的天空处透出 Ballance 自己的场景，方块仍然盖在上面。帧里 **86.7% 的
+像素 alpha=0**，剩下的 13% 是 MC 自己画的准星、快捷栏、手臂和教学提示。Ballance 侧手搓的
+那套 HUD（`MinecraftHud.*`）同日删除：两套叠着只是重影，而真的那套一直在 MC 帧里。
+细节与五个坑见 [docs/mc-void-world.md](docs/mc-void-world.md)。
 
 ## 目录
 

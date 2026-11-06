@@ -133,12 +133,13 @@ for %D in (Bin BuildingBlocks Managers Plugins RenderEngines) do robocopy D:\bmc
 * `stage\Bin\Player.ini` 里 `SkipOpening = 0`，会覆盖掉可玩目录里的 1 —— 铺完再改回 `SkipOpening = 1`，
   否则每次启动都要等一分钟开场。
 * **删掉 `D:\bmc-play\Bin\Minecraft.ini`**。它是上次试玩留下的存档，会压过新默认值
-  （现在的默认是 `Hud=1 / Steve=0 / FirstPerson=1`）；删掉才会走默认，面板里再改会重新写出来。
+  （现在的默认是 `Steve=0 / FirstPerson=1`）；删掉才会走默认，面板里再改会重新写出来。
 
 ### 加了新的源文件，一定要重跑 configure
 
-`build.bat` 只跑 `cmake --build`。上一轮加了 `MinecraftHud.cpp` 却只编了 6 个老目标，
-链接时 4 个 `CMinecraftHud` 符号未解析（`LNK2019`）——`build.ninja` 还是旧的，源文件列表里没有它。
+`build.bat` 只跑 `cmake --build`。上一轮加了一个新源文件却只编了 6 个老目标，链接时 4 个
+符号未解析（`LNK2019`）——`build.ninja` 还是旧的，源文件列表里没有它。所以 `Source/Player/src`
+下的文件增删之后，一定要先走一遍 configure 再 build。
 `run2.bat`（先 `configure.bat` 再 `build.bat`，两者各自带日志）就是为这个准备的：
 
 ```bat
@@ -149,9 +150,9 @@ call D:\bmc-build\build.bat > D:\bmc-build\build.log 2>&1
 
 ### 一个 MSVC 才有的坑：POSIX 字符串函数
 
-`strncasecmp` 在 MSVC 里只有 `_strnicmp`。`MinecraftHud.cpp` 里用
-`#if defined(_MSC_VER)` 切到 `_strnicmp`，Linux 侧仍是 `strncasecmp`（名字统一走 `BALLANCE_STRNCASECMP`）。
-同类函数（`strcasestr`、`strdup`、`mmap`）在这台机器上已经踩过两次，写 Player 侧代码时先想一下。
+`strncasecmp` 在 MSVC 里只有 `_strnicmp`；`strcasestr`、`strdup` 也没有。Player 侧凡是碰到这些
+名字，都用 `#if defined(_MSC_VER)` 切一份 MSVC 实现（当年的 HUD 里就是这么包的，那段代码已随
+HUD 补丁一起移除）。同类函数在这台机器上已经踩过两次，写 Player 侧代码时先想一下。
 
 ## 一次完整重建用了多久
 

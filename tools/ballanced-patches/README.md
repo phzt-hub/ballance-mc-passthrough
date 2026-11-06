@@ -41,9 +41,6 @@ re-attaches its own camera on every `LaunchScene`.
 Also carries the PoC frame-log scaffolding: `BALLANCE_POC_FRAMELOG`,
 `BALLANCE_POC_BBOX`, `BALLANCE_POC_ISOLATE`, `BALLANCE_POC_CAM`.
 
-Also carries the Minecraft HUD (`MinecraftHud.*`: crosshair, nine-slot hotbar, hearts
-from the level's Energy array, experience bar, first-person arm). See `docs/mc-hud.md`.
-
 Also carries the in-game settings panel: `MinecraftSettings.*` (the eight rows, the
 `Bin/Minecraft.ini` they are written to, and the environment override that wins over it),
 `MinecraftOverlay.*` (a self-drawn F1 overlay using the render context's post-sprite
@@ -61,6 +58,12 @@ scale rather than `CKContext::Pause()`.
 `CKSdlGpuRasterizerDepthDump.cpp` -- dumps the depth buffer of a submitted frame
 when `BALLANCE_POC1_DEPTH_FRAMES` is set, hooked into
 `CKSdlGpuRasterizerContext::Submit()`.
+
+`CKFFPresentDraw::Prepare` / `CKSdlGpuPresentStage::SubmitTexture` -- an `AlphaBlend`
+flag on the fullscreen present draw. `SubmitCopy` (the passthrough frame) sets it, so the
+quad composites source-alpha over the destination instead of replacing it; without it the
+Minecraft frame painted over the whole Ballance scene with one flat colour. Resolve and blit
+pass `FALSE` and stay opaque.
 
 ### SdlInputManager.patch
 Two port fixes. `Cursor.cpp`: `KeepSystemCursorVisible()` pins
@@ -91,8 +94,8 @@ its own `base_commit`; the resulting tree is byte-identical to the dirty tree
 untracked and were excluded from that comparison.
 
 ```
-Player.patch          base e5073295 14 files  4975 lines
+Player.patch          base e5073295 15 files  4762 lines
 BuildingBlocks.patch  base 5b833b92  4 files  790 lines
-RenderEngine.patch    base 049c78b3  8 files  917 lines
+RenderEngine.patch    base 049c78b3 15 files  1091 lines
 SdlInputManager.patch base 368d4143  2 files   74 lines
 ```

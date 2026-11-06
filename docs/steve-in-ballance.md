@@ -6,13 +6,11 @@ M0/M0b 的方向是反的：那套把 Minecraft 整帧贴到 Ballance 窗口上�
 
 ## 2026-11-05 起：身体默认不画
 
-面板与 ini 的默认值改成 **Steve=0 / FirstPerson=1 / Hud=1 / HudScale=1**。
+面板与 ini 的默认值改成 **Steve=0 / FirstPerson=1**。
 `CMinecraftSteve` 内部把「身体」和「驾驶舱」拆开了：`m_DrawBody` 只由 `Steve` 决定，
 模块本身的启用条件是 `steve || firstPerson`。所以默认状态下相机照样挂在球上、
-相对鼠标照样工作、HUD 的第一人称手臂照样画，**画面里没有任何方块人**。
+相对鼠标照样工作、第一人称的手臂由 MC 自己的帧画，**画面里没有任何方块人**。
 想看模型随时在 F1 面板把 `Steve` 打开（`BALLANCE_MC_STEVE=1`）。
-
-HUD 本身见 [`docs/mc-hud.md`](mc-hud.md)。
 
 ## 一个画面里只有一个化身（2026-11-05 定）
 
@@ -147,7 +145,7 @@ PASS
 `docs/view-shots/`（2026-11-05 重拍，**真在 Level_01 里**）：
 
 - `01-third-person.png` 第三人称：球道，没有 Steve、没有手臂
-- `02-first-person-arm.png` 第一人称：手臂 + HUD
+- `02-first-person-arm.png` 第一人称：手臂（那时还叠着 Ballance 侧手搓的 HUD，2026-11-06 已删）
 - `03-body-on.png` 同一机位把 `Steve` 打开：他就在那儿（证明相机看得见那个位置，缺省视角只是没要他）
 
 `docs/steve-shots/`（2026-11-05 早些时候，机位走的是**合并关卡**那条路）：

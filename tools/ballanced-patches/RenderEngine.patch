@@ -1,3 +1,50 @@
+diff --git a/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.cpp b/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.cpp
+index 7d05b46..6fd0ea0 100644
+--- a/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.cpp
++++ b/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.cpp
+@@ -14,7 +14,7 @@ struct CKFFPresentVertex {
+ CKERROR CKFFPresentDraw::Prepare(
+     CKDWORD Texture, CKDWORD Width, CKDWORD Height,
+     CKBOOL Linear, CKBOOL FXAA, float Sharpness,
+-    CKBOOL FlipV, CKDWORD Program, CKDWORD Layout,
++    CKBOOL FlipV, CKBOOL AlphaBlend, CKDWORD Program, CKDWORD Layout,
+     CKTransientVertexData &Vertices, CKDrawCommand &Draw)
+ {
+     if (!Vertices.Data || Vertices.Count < 3 ||
+@@ -58,6 +58,12 @@ CKERROR CKFFPresentDraw::Prepare(
+         .Depth(FALSE, FALSE, VXCMP_ALWAYS)
+         .Cull(VXCULL_NONE)
+         .Build();
++    if (AlphaBlend) {
++        // Colour: src.a over (1 - src.a). Alpha: the channel is straight, not
++        // premultiplied, so the destination keeps its own coverage term.
++        state.State.Lo |= CKRST_STATE_BLEND_SEPARATE(
++            VXBLEND_SRCALPHA, VXBLEND_INVSRCALPHA, VXBLEND_ONE, VXBLEND_INVSRCALPHA);
++    }
+     m_Bindings[CKFF_SLOT_PRESENT].Texture = Texture;
+     m_Bindings[CKFF_SLOT_PRESENT].Sampler = sampler;
+ 
+diff --git a/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.h b/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.h
+index 9c4d504..39deafa 100644
+--- a/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.h
++++ b/src/CKRasterizer/CKFFPLib/FixedFunction/CKFFPresentDraw.h
+@@ -8,9 +8,15 @@
+ // submits the resulting command directly to its native graphics API.
+ class CKFFPresentDraw {
+ public:
++    // AlphaBlend composites the source over the destination (source alpha, one
++    // minus source alpha) instead of replacing it. A snapshot that carries the
++    // producer's alpha -- the Minecraft passthrough frame does, its sky is cleared
++    // to 0 -- has to composite, or the quad paints over the host scene with a
++    // single flat colour.
+     CKERROR Prepare(CKDWORD Texture, CKDWORD Width, CKDWORD Height,
+                     CKBOOL Linear, CKBOOL FXAA, float Sharpness,
+-                    CKBOOL FlipV, CKDWORD Program, CKDWORD Layout,
++                    CKBOOL FlipV, CKBOOL AlphaBlend,
++                    CKDWORD Program, CKDWORD Layout,
+                     CKTransientVertexData &Vertices, CKDrawCommand &Draw);
+ 
+ private:
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/CMakeLists.txt b/src/CKRasterizer/CKSdlGpuRasterizer/CMakeLists.txt
 index ff62cbf..0db90b1 100644
 --- a/src/CKRasterizer/CKSdlGpuRasterizer/CMakeLists.txt
@@ -109,6 +156,57 @@ index 0000000..a182209
 +                               CKSdlGpuPassthroughState &State);
 +
 +#endif // CKSDLGPUPASSTHROUGH_H
+diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.cpp b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.cpp
+index 19e0c43..cb5e647 100644
+--- a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.cpp
++++ b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.cpp
+@@ -306,16 +306,20 @@ CKERROR CKSdlGpuPresentStage::Submit(const CKSdlGpuPresentTarget &source, CKBOOL
+ {
+     if (!source.IsActive())
+         return CKERR_INVALIDPARAMETER;
+-    return SubmitTexture(source.ColorTexture, source.Width, source.Height, TRUE, fxaa, sharpness);
++    return SubmitTexture(source.ColorTexture, source.Width, source.Height, TRUE, fxaa, sharpness,
++                         FALSE);
+ }
+ 
+ CKERROR CKSdlGpuPresentStage::SubmitCopy(CKDWORD texture, CKDWORD width, CKDWORD height)
+ {
+-    return SubmitTexture(texture, width, height, FALSE, FALSE, 0.0f);
++    // A copy is the one present draw that composites: it is the passthrough frame,
++    // whose alpha says which texels belong to the overlay and which to the host.
++    return SubmitTexture(texture, width, height, FALSE, FALSE, 0.0f, TRUE);
+ }
+ 
+ CKERROR CKSdlGpuPresentStage::SubmitTexture(CKDWORD texture, CKDWORD width, CKDWORD height,
+-                                     CKBOOL linear, CKBOOL fxaa, float sharpness)
++                                     CKBOOL linear, CKBOOL fxaa, float sharpness,
++                                     CKBOOL alphaBlend)
+ {
+     if (!m_Context || !texture || !width || !height || !EnsureResources())
+         return CKERR_NOTIMPLEMENTED;
+@@ -329,7 +333,7 @@ CKERROR CKSdlGpuPresentStage::SubmitTexture(CKDWORD texture, CKDWORD width, CKDW
+     CKDrawCommand draw;
+     const CKERROR prepared = m_Draw.Prepare(
+         texture, width, height, linear, fxaa, sharpness,
+-        originBottomLeft ? FALSE : TRUE,
++        originBottomLeft ? FALSE : TRUE, alphaBlend,
+         m_ResourceIds.Program, m_ResourceIds.VertexLayout, tvb, draw);
+     return prepared == CK_OK ? m_Context->Draw(&draw) : prepared;
+ }
+diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.h b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.h
+index e7d044c..c70fbe4 100644
+--- a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.h
++++ b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPresentStage.h
+@@ -104,7 +104,8 @@ private:
+     void DestroyReadbackTexture();
+     CKERROR Submit(const CKSdlGpuPresentTarget &source, CKBOOL fxaa, float sharpness);
+     CKERROR SubmitTexture(CKDWORD texture, CKDWORD width, CKDWORD height,
+-                          CKBOOL linear, CKBOOL fxaa, float sharpness);
++                          CKBOOL linear, CKBOOL fxaa, float sharpness,
++                          CKBOOL alphaBlend);
+ 
+     CKSdlGpuRasterizerContext *m_Context;
+     CKFFPresentDraw m_Draw;
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerContext.h b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerContext.h
 index c7588dd..175c80f 100644
 --- a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerContext.h
@@ -915,3 +1013,79 @@ index 0000000..eb96029
 +} MpFrameHeader;
 +
 +#endif // MPFRAME_H
+diff --git a/tests/support/FFPRecordingPresentStage.cpp b/tests/support/FFPRecordingPresentStage.cpp
+index c7448b2..27305eb 100644
+--- a/tests/support/FFPRecordingPresentStage.cpp
++++ b/tests/support/FFPRecordingPresentStage.cpp
+@@ -249,18 +249,18 @@ CKERROR FFPRecordingPresentStage::Submit(const FFPRecordingPresentTarget &source
+     if (!source.IsActive())
+         return CKERR_INVALIDPARAMETER;
+     return SubmitTexture(source.ColorTexture, source.Width, source.Height, TRUE, fxaa, sharpness,
+-                         !m_Backend->GetCaps().OriginBottomLeft);
++                         !m_Backend->GetCaps().OriginBottomLeft, FALSE);
+ }
+ 
+ CKERROR FFPRecordingPresentStage::SubmitCopy(CKDWORD texture, CKDWORD width, CKDWORD height)
+ {
+     return SubmitTexture(texture, width, height, FALSE, FALSE, 0.0f,
+-                         !m_Backend->GetCaps().OriginBottomLeft);
++                         !m_Backend->GetCaps().OriginBottomLeft, TRUE);
+ }
+ 
+ CKERROR FFPRecordingPresentStage::SubmitTexture(CKDWORD texture, CKDWORD width, CKDWORD height,
+                                      CKBOOL linear, CKBOOL fxaa, float sharpness,
+-                                     CKBOOL flipV)
++                                     CKBOOL flipV, CKBOOL alphaBlend)
+ {
+     if (!m_Backend || !texture || !width || !height || !EnsureResources())
+         return CKERR_NOTIMPLEMENTED;
+@@ -272,7 +272,7 @@ CKERROR FFPRecordingPresentStage::SubmitTexture(CKDWORD texture, CKDWORD width,
+ 
+     CKDrawCommand draw;
+     const CKERROR prepared = m_Draw.Prepare(
+-        texture, width, height, linear, fxaa, sharpness, flipV,
++        texture, width, height, linear, fxaa, sharpness, flipV, alphaBlend,
+         m_ResourceIds.Program, m_ResourceIds.VertexLayout, tvb, draw);
+     return prepared == CK_OK ? m_Backend->Draw(&draw) : prepared;
+ }
+diff --git a/tests/support/FFPRecordingPresentStage.h b/tests/support/FFPRecordingPresentStage.h
+index 1a77f2b..ba727fe 100644
+--- a/tests/support/FFPRecordingPresentStage.h
++++ b/tests/support/FFPRecordingPresentStage.h
+@@ -88,7 +88,7 @@ private:
+     CKERROR Submit(const FFPRecordingPresentTarget &source, CKBOOL fxaa, float sharpness);
+     CKERROR SubmitTexture(CKDWORD texture, CKDWORD width, CKDWORD height,
+                           CKBOOL linear, CKBOOL fxaa, float sharpness,
+-                          CKBOOL flipV);
++                          CKBOOL flipV, CKBOOL alphaBlend);
+ 
+     CKRecordingBackend *m_Backend;
+     CKFFPresentDraw m_Draw;
+diff --git a/tests/test_ffp_pipeline.cpp b/tests/test_ffp_pipeline.cpp
+index 908b2d4..99016c7 100644
+--- a/tests/test_ffp_pipeline.cpp
++++ b/tests/test_ffp_pipeline.cpp
+@@ -4615,7 +4615,7 @@ void SharedPresentPreparationBuildsTheCompleteDraw() {
+     CKFFPresentDraw present;
+     CKDrawCommand draw;
+     TestCheck(present.Prepare(11, 100, 50, TRUE, TRUE, 0.25f,
+-                              FALSE, 21, 31, transient, draw) == CK_OK,
++                              FALSE, FALSE, 21, 31, transient, draw) == CK_OK,
+               "shared presentation draw prepares valid inputs");
+     TestCheck(vertices[3] == 0.0f && vertices[4] == 0.0f &&
+                   vertices[8] == 2.0f && vertices[9] == 0.0f &&
+@@ -4643,12 +4643,12 @@ void SharedPresentPreparationBuildsTheCompleteDraw() {
+               "prepared draw carries texel size, FXAA and sharpness constants");
+ 
+     TestCheck(present.Prepare(11, 100, 50, FALSE, FALSE, 0.0f,
+-                              TRUE, 21, 31, transient, draw) == CK_OK &&
++                              TRUE, FALSE, 21, 31, transient, draw) == CK_OK &&
+                   vertices[4] == 1.0f && vertices[14] == -1.0f,
+               "shared presentation draw applies vertical flipping");
+     transient.Stride = 4 * sizeof(float);
+     TestCheck(present.Prepare(11, 100, 50, FALSE, FALSE, 0.0f,
+-                              FALSE, 21, 31, transient, draw) ==
++                              FALSE, FALSE, 21, 31, transient, draw) ==
+                   CKERR_OUTOFMEMORY,
+               "undersized transient presentation vertices are rejected");
+ }
