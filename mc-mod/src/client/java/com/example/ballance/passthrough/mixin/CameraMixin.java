@@ -46,6 +46,12 @@ public abstract class CameraMixin {
         }
         McCameraMapper.ensure(pose);
         final double[] eye = McCameraMapper.toBlocks(pose.eye());
+        // No aim lift here on purpose. Tilting the camera does not move the
+        // crosshair away from the ball: the ball is drawn by Ballance, at the
+        // centre of ITS frame, and the crosshair is the centre of this one, so
+        // the two meet whatever the camera looks at. What lifts the aim is the
+        // player's rotation (see CameraSync), and the crosshair is then drawn
+        // where that aim would put a block (HudMixin).
         final float[] yawPitch = McCameraMapper.yawPitch(pose.forward());
         setPosition(eye[0], eye[1], eye[2]);
         setRotation(yawPitch[0], yawPitch[1]);

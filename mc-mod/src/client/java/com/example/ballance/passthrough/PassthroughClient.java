@@ -14,6 +14,9 @@ public final class PassthroughClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         McFrameExport.initialise();
+        // The "do not pause when another window has the focus" policy is applied
+        // on the first client tick instead: this entrypoint runs inside
+        // Minecraft's constructor, before Options exists.
         // M1: the camera channel is opened lazily on the first frame, because the
         // Ballance side creates the shared object when it starts publishing and
         // either process may come up first.

@@ -38,7 +38,7 @@ index 347ca16..4bc5d2e 100644
  
  #define GAMECONFIG_PATH_FIELDS \
 diff --git a/src/GamePlayer.cpp b/src/GamePlayer.cpp
-index 4ffa776..c39a9b2 100644
+index 4ffa776..2a564ff 100644
 --- a/src/GamePlayer.cpp
 +++ b/src/GamePlayer.cpp
 @@ -1,4 +1,4 @@
@@ -47,7 +47,7 @@ index 4ffa776..c39a9b2 100644
  #include "PlayerOptions.h"
  
  #include <ctype.h>
-@@ -288,6 +288,16 @@ bool CGamePlayer::Init(const CGameConfig &runtimeConfig, const CGameConfig &pers
+@@ -288,6 +288,17 @@ bool CGamePlayer::Init(const CGameConfig &runtimeConfig, const CGameConfig &pers
          SDL_RaiseWindow(m_SdlWindow);
      }
  
@@ -59,12 +59,13 @@ index 4ffa776..c39a9b2 100644
 +        CLogger::Get().Error("Failed to load Minecraft settings: %s",
 +                             m_MinecraftSettings.GetPath());
 +    m_MinecraftPanel.SetSettings(&m_MinecraftSettings);
++    m_CameraSync.SetSettings(&m_MinecraftSettings);
 +    m_Steve.SetSettings(&m_MinecraftSettings);
 +
      m_State = eReady;
      return true;
  }
-@@ -382,6 +392,1036 @@ bool CGamePlayer::Load(const char *filename)
+@@ -382,6 +393,1036 @@ bool CGamePlayer::Load(const char *filename)
      return FinishLoad(filename, resolvedFile.CStr());
  }
  
@@ -1101,7 +1102,7 @@ index 4ffa776..c39a9b2 100644
  void CGamePlayer::Run()
  {
      while (Update())
-@@ -469,8 +1509,61 @@ void CGamePlayer::Process()
+@@ -469,8 +1510,64 @@ void CGamePlayer::Process()
      m_CKContext->Process();
  }
  
@@ -1146,14 +1147,17 @@ index 4ffa776..c39a9b2 100644
 +    const Uint64 nowTicks = SDL_GetTicks();
 +    const float elapsed = lastTicks ? (float)(nowTicks - lastTicks) / 1000.0f : 0.0f;
 +    lastTicks = nowTicks;
-+    // M1: hand the viewpoint this frame will be drawn from to the Minecraft
-+    // client. It has to be current (the level scripts move the camera every
-+    // frame), so it is sampled right before the draw, not after it.
-+    m_CameraSync.Frame(m_CKContext, m_RenderContext, elapsed);
 +    {
 +        // The panel owns the F1 key and the clicks, and whatever it changes in
-+        // the settings is picked up by Steve in the same frame.
++        // the settings is picked up by Steve in the same frame. It runs before
++        // the camera sync so the sync sees this frame's panel state (the two
++        // share the pause gate and the E key must not reach Minecraft while the
++        // panel has the pointer).
 +        m_MinecraftPanel.Frame(m_CKContext, m_RenderContext, elapsed);
++        // M1: hand the viewpoint this frame will be drawn from to the Minecraft
++        // client. It has to be current (the level scripts move the camera every
++        // frame), so it is sampled right before the draw, not after it.
++        m_CameraSync.Frame(m_CKContext, m_RenderContext, elapsed);
 +        // Steve is placed through the normal scene graph, so it is drawn by
 +        // the game's own 3D pass and therefore depth tested against the track.
 +        m_Steve.SetPanelOpen(m_MinecraftPanel.IsOpen());
@@ -1163,7 +1167,7 @@ index 4ffa776..c39a9b2 100644
      m_RenderContext->Render();
  }
  
-@@ -485,6 +1578,10 @@ void CGamePlayer::Shutdown()
+@@ -485,6 +1582,10 @@ void CGamePlayer::Shutdown()
          m_GameInfo = NULL;
      }
  
@@ -1174,7 +1178,7 @@ index 4ffa776..c39a9b2 100644
      ShutdownEngine();
      ShutdownWindow();
  
-@@ -498,6 +1595,8 @@ void CGamePlayer::Shutdown()
+@@ -498,6 +1599,8 @@ void CGamePlayer::Shutdown()
  void CGamePlayer::Play()
  {
      m_State = ePlaying;
@@ -1183,7 +1187,7 @@ index 4ffa776..c39a9b2 100644
      m_CKContext->Play();
      CLogger::Get().Debug("Game is playing.");
  }
-@@ -1542,6 +2641,7 @@ void CGamePlayer::OnActivateApp(bool active)
+@@ -1542,6 +2645,7 @@ void CGamePlayer::OnActivateApp(bool active)
                  m_InputManager->Pause(TRUE);
  
              ReleaseCursorClip();
@@ -1239,11 +1243,13 @@ index 3b54c38..5526b84 100644
  #endif /* PLAYER_GAMEPLAYER_H */
 diff --git a/src/MinecraftCameraSync.cpp b/src/MinecraftCameraSync.cpp
 new file mode 100644
-index 0000000..88d3fc1
+index 0000000..0772562
 --- /dev/null
 +++ b/src/MinecraftCameraSync.cpp
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,643 @@
 +#include "MinecraftCameraSync.h"
++
++#include "MinecraftSettings.h"
 +
 +#include <cerrno>
 +#include <chrono>
@@ -1307,6 +1313,39 @@ index 0000000..88d3fc1
 +    return false;
 +}
 +
++// A key pressed and released inside one frame is invisible to IsKeyDown():
++// SDL can deliver both events before the frame polls, which is why the panel
++// scans the same key buffer. One E press must be exactly one toggle.
++bool key_tapped(CKInputManager *input, CKDWORD key)
++{
++    if (!input) return false;
++    const int count = input->GetNumberOfKeyInBuffer();
++    CKDWORD buffered = 0;
++    for (int i = 0; i < count; ++i)
++    {
++        if (input->GetKeyFromBuffer(i, buffered) == KEY_PRESSED && buffered == key) return true;
++    }
++    return false;
++}
++
++// Seqlock reads on the client -> Ballance side of the object. The writer is the
++// Java mod, so the pair has to be an acquire load on both ends of the copy.
++#if defined(_WIN32)
++unsigned read_seq(const volatile uint32_t *value)
++{
++    return (unsigned)_InterlockedCompareExchange((volatile long *)value, 0, 0);
++}
++#else
++unsigned read_seq(const uint32_t *value)
++{
++    return __atomic_load_n(value, __ATOMIC_ACQUIRE);
++}
++#endif
++
++// --- pause gate state, process wide (there is one level at a time) ---
++unsigned g_PauseKeys = 0;
++float g_PauseSavedScale = 1.0f;
++
 +float normalize(VxVector &v)
 +{
 +    const float length = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -1319,6 +1358,45 @@ index 0000000..88d3fc1
 +}
 +
 +} // namespace
++
++void CMinecraftPauseGate::Set(CKContext *context, unsigned key, bool paused)
++{
++    const unsigned before = g_PauseKeys;
++    if (paused)
++        g_PauseKeys |= key;
++    else
++        g_PauseKeys &= ~key;
++
++    CKTimeManager *timeManager =
++        context ? (CKTimeManager *)context->GetManagerByGuid(TIME_MANAGER_GUID) : nullptr;
++    if (!timeManager) return;
++
++    if (g_PauseKeys && !before)
++    {
++        g_PauseSavedScale = timeManager->GetTimeScaleFactor();
++        timeManager->SetTimeScaleFactor(0.0f);
++    }
++    else if (!g_PauseKeys && before)
++    {
++        timeManager->SetTimeScaleFactor(g_PauseSavedScale);
++    }
++    else if (g_PauseKeys && timeManager->GetTimeScaleFactor() != 0.0f)
++    {
++        // A level script is free to put the time scale back; while an overlay
++        // holds the gate, the overlay owns it.
++        timeManager->SetTimeScaleFactor(0.0f);
++    }
++}
++
++bool CMinecraftPauseGate::Held(unsigned key)
++{
++    return (g_PauseKeys & key) != 0u;
++}
++
++bool CMinecraftPauseGate::Paused()
++{
++    return g_PauseKeys != 0u;
++}
 +
 +CMinecraftCameraSync::CMinecraftCameraSync()
 +{
@@ -1404,6 +1482,7 @@ index 0000000..88d3fc1
 +    m_FileHandle = file;
 +    m_Section = section;
 +    m_Header = (MpCameraHeader *)base;
++    m_Status = (MpClientStatus *)((char *)base + MPS_OFFSET);
 +#else
 +    m_Fd = shm_open(m_ShmName, O_CREAT | O_RDWR, 0666);
 +    if (m_Fd < 0) {
@@ -1427,6 +1506,7 @@ index 0000000..88d3fc1
 +        return false;
 +    }
 +    m_Header = (MpCameraHeader *)base;
++    m_Status = (MpClientStatus *)((char *)base + MPS_OFFSET);
 +#endif
 +
 +    m_Header->Magic = MPC_MAGIC;
@@ -1441,6 +1521,7 @@ index 0000000..88d3fc1
 +{
 +    if (!m_Mapped || !m_Header) {
 +        m_Header = nullptr;
++        m_Status = nullptr;
 +        return;
 +    }
 +    m_Header->Flags = 0;
@@ -1461,6 +1542,7 @@ index 0000000..88d3fc1
 +    m_Fd = -1;
 +#endif
 +    m_Header = nullptr;
++    m_Status = nullptr;
 +    m_Mapped = false;
 +}
 +
@@ -1552,6 +1634,15 @@ index 0000000..88d3fc1
 +    m_Header->UnitsPerBlock = header.UnitsPerBlock;
 +    m_Header->Frame = header.Frame;
 +    m_Header->TimeNs = header.TimeNs;
++    // M1b: the aim lift and the input mirror ride the same seqlock, so a reader
++    // never sees a pointer position from one frame next to a camera from another.
++    m_Header->AimLift = header.AimLift;
++    m_Header->MouseX = header.MouseX;
++    m_Header->MouseY = header.MouseY;
++    m_Header->InputButtons = header.InputButtons;
++    m_Header->Wheel = header.Wheel;
++    m_Header->KeyE = header.KeyE;
++    m_Header->KeyEsc = header.KeyEsc;
 +    // The sequence store is the publication barrier: everything above has to be
 +    // visible to a reader that acquires this value (see MpCamera.h).
 +#if defined(_WIN32)
@@ -1559,6 +1650,98 @@ index 0000000..88d3fc1
 +#else
 +    __atomic_store_n(&m_Header->Seq, seq, __ATOMIC_RELEASE);
 +#endif
++}
++
++float CMinecraftCameraSync::AimLiftRadians() const
++{
++    if (!m_Settings) return 0.0f;
++    const float degrees = m_Settings->GetFloat(eMcAimLift);
++    return degrees * (3.14159265358979323846f / 180.0f);
++}
++
++void CMinecraftCameraSync::PublishInput(CKContext *context, CKRenderContext *renderContext,
++                                        MpCameraHeader &header)
++{
++    // Neutral by default: the menu has no ball, and handing the pointer to
++    // Minecraft while the menu is up would open an inventory over the menu.
++    header.AimLift = AimLiftRadians();
++    header.MouseX = 0.5f;
++    header.MouseY = 0.5f;
++    header.InputButtons = 0u;
++    header.Wheel = m_Wheel;
++    header.KeyE = m_KeyE;
++    header.KeyEsc = m_KeyEsc;
++
++    CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (!input) return;
++    if (!(header.Flags & MPC_FLAG_BALL)) return;
++    // The settings panel owns the pointer while it is open: forwarding E or a
++    // click to Minecraft there would open an inventory behind the panel.
++    if (CMinecraftPauseGate::Held(CMinecraftPauseGate::ePanel)) return;
++
++    const float width = (float)renderContext->GetWidth();
++    const float height = (float)renderContext->GetHeight();
++    Vx2DVector pointer;
++    input->GetMousePosition(pointer, FALSE);
++    if (width > 1.0f) header.MouseX = pointer.x / width;
++    if (height > 1.0f) header.MouseY = pointer.y / height;
++
++    if (input->IsMouseButtonDown(CK_MOUSEBUTTON_LEFT)) header.InputButtons |= MPC_BUTTON_LEFT;
++    if (input->IsMouseButtonDown(CK_MOUSEBUTTON_RIGHT)) header.InputButtons |= MPC_BUTTON_RIGHT;
++    if (input->IsMouseButtonDown(CK_MOUSEBUTTON_MIDDLE)) header.InputButtons |= MPC_BUTTON_MIDDLE;
++
++    // The wheel is a per-frame delta in Windows units (120 per notch) and this
++    // side runs faster than the client's 20 ticks a second, so it is summed here
++    // and published as a total: a frame the client never sampled loses nothing.
++    VxVector relative;
++    input->GetMouseRelativePosition(relative);
++    if (relative.z != 0.0f) m_Wheel += (int32_t)relative.z;
++    header.Wheel = m_Wheel;
++
++    // One press, one toggle: edge on the frame's key state, plus the buffer for
++    // the tap that started and ended between two frames.
++    const bool e = input->IsKeyDown(CKKEY_E) != FALSE || key_tapped(input, CKKEY_E);
++    if (e && !m_EDown) ++m_KeyE;
++    m_EDown = e;
++    const bool escape = input->IsKeyDown(CKKEY_ESCAPE) != FALSE || key_tapped(input, CKKEY_ESCAPE);
++    if (escape && !m_EscDown) ++m_KeyEsc;
++    m_EscDown = escape;
++    header.KeyE = m_KeyE;
++    header.KeyEsc = m_KeyEsc;
++}
++
++void CMinecraftCameraSync::SyncInventoryState(CKContext *context, CKInputManager *input)
++{
++    if (!m_Status) return;
++
++    bool guiOpen = false;
++    const unsigned before = read_seq(&m_Status->Seq);
++    if (before != 0u && m_Status->Magic == MPS_MAGIC)
++    {
++        const uint32_t open = m_Status->GuiOpen;
++        const unsigned after = read_seq(&m_Status->Seq);
++        guiOpen = (before == after) && open != 0u;
++    }
++
++    const bool wasOpen = m_InventoryOpen;
++    if (guiOpen != wasOpen)
++    {
++        m_InventoryOpen = guiOpen;
++        log_line("minecraft inventory %s", guiOpen ? "open -- level frozen, pointer handed over"
++                                                    : "closed -- level resumed");
++    }
++
++    // The level stands still while the inventory is up: the pointer is on loan to
++    // Minecraft, and a rolling ball would be gone before the block is picked.
++    CMinecraftPauseGate::Set(context, CMinecraftPauseGate::eInventory, guiOpen);
++    if (input)
++    {
++        // Only on the transition: the menu wants the cursor too, and re-hiding it
++        // every frame would take the menu's pointer away.
++        if (guiOpen) input->ShowCursor(TRUE);
++        else if (wasOpen && !CMinecraftPauseGate::Held(CMinecraftPauseGate::ePanel))
++            input->ShowCursor(FALSE);
++    }
 +}
 +
 +void CMinecraftCameraSync::Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds)
@@ -1641,7 +1824,16 @@ index 0000000..88d3fc1
 +                        std::chrono::steady_clock::now().time_since_epoch())
 +                        .count();
 +
++    // M1b: what the pointer and the two forwarded keys are doing this frame. Has
++    // to run before Publish, because it fills the same seqlock payload.
++    PublishInput(context, renderContext, header);
++
 +    Publish(header);
++
++    // ... and what Minecraft says it is doing with them. Runs after Publish so
++    // the freeze this frame reflects the state the client reported last frame.
++    SyncInventoryState(context,
++                       (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID));
 +    ++m_Publishes;
 +
 +    // Diagnostic: which cameras exist, where they are, and which one the engine
@@ -1700,16 +1892,46 @@ index 0000000..88d3fc1
 +}
 diff --git a/src/MinecraftCameraSync.h b/src/MinecraftCameraSync.h
 new file mode 100644
-index 0000000..865ecdb
+index 0000000..0152398
 --- /dev/null
 +++ b/src/MinecraftCameraSync.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,125 @@
 +#ifndef PLAYER_MINECRAFTCAMERASYNC_H
 +#define PLAYER_MINECRAFTCAMERASYNC_H
 +
 +#include "CKAll.h"
 +
 +#include "MpCamera.h"
++
++class CMinecraftSettings;
++
++// One time-scale owner shared by the settings panel and the inventory overlay.
++//
++// Both want the level standing still, and both used to save/restore the time
++// scale factor themselves -- which breaks the moment they nest: the second one
++// saves a scale of 0, and closing it restores 0 with the first one still open.
++// The gate counts the reasons instead, freezes on the first and restores the
++// scale it saved when the last one lets go.
++//
++// Freezing is a time scale of 0, not CKContext::Pause(): a paused context stops
++// ExecuteManagersPreProcess, and the SDL input manager is a pre-process manager,
++// so no pointer or key event would arrive to close the overlay again. (Measured
++// in the panel: with the pause in place, a click produced no press at all.)
++class CMinecraftPauseGate
++{
++public:
++    enum Key
++    {
++        ePanel = 1u,
++        eInventory = 2u,
++    };
++
++    // Idempotent: call it every frame with the current wish, and it re-asserts
++    // the freeze if a level script put the time scale back.
++    static void Set(CKContext *context, unsigned key, bool paused);
++    static bool Held(unsigned key);
++    static bool Paused();
++};
 +
 +// Publishes the viewpoint the frame is about to be rendered from, plus the player
 +// ball position, into the camera channel described by MpCamera.h (milestone M1 of
@@ -1720,6 +1942,11 @@ index 0000000..865ecdb
 +// it to place its own camera, so after the passthrough is switched on the two
 +// images are views of the same place, not two unrelated pictures.
 +//
++// Since M1b the same object also carries the input mirror (pointer, buttons,
++// wheel, the E and Escape presses) and the aim lift, and the Minecraft side
++// writes back whether the inventory it opened is still on screen -- that back
++// channel decides whether this side freezes the level and shows the pointer.
++//
 +// Off unless BALLANCE_MC_CAMERA=1; the mapping is created on first use and never
 +// blocks the render thread. Nothing here is on the frame's critical path when the
 +// feature is off: the cost is one environment lookup at construction.
@@ -1729,9 +1956,15 @@ index 0000000..865ecdb
 +    CMinecraftCameraSync();
 +    ~CMinecraftCameraSync();
 +
++    void SetSettings(CMinecraftSettings *settings) { m_Settings = settings; }
++
 +    // Called once per rendered frame, before CGamePlayer::Render() draws.
 +    void Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds);
 +    void Shutdown();
++
++    // Test hook: BALLANCE_MC_CAMERA_FAKE_GUI=1 pretends the Minecraft inventory
++    // is on screen, so the freeze can be exercised without a Minecraft client.
++    bool InventoryOpen() const { return m_InventoryOpen; }
 +
 +private:
 +    bool Initialise();
@@ -1740,6 +1973,9 @@ index 0000000..865ecdb
 +    void FindBall(CKContext *context);
 +    bool BallAlive(CKContext *context);
 +    void Publish(const MpCameraHeader &header);
++    void PublishInput(CKContext *context, CKRenderContext *renderContext, MpCameraHeader &header);
++    void SyncInventoryState(CKContext *context, CKInputManager *input);
++    float AimLiftRadians() const;
 +
 +    bool m_Enabled = false;
 +    bool m_Initialised = false;
@@ -1751,6 +1987,7 @@ index 0000000..865ecdb
 +    void *m_FileHandle = nullptr;
 +    void *m_Section = nullptr;
 +    MpCameraHeader *m_Header = nullptr;
++    MpClientStatus *m_Status = nullptr;
 +
 +    char m_Path[512] = {};
 +    char m_ShmName[128] = {};
@@ -1764,6 +2001,20 @@ index 0000000..865ecdb
 +    // player ball apart from the pickups parked at the origin.
 +    VxVector m_Eye = VxVector(0.0f, 0.0f, 0.0f);
 +    VxVector m_Forward = VxVector(0.0f, 0.0f, 1.0f);
++
++    CMinecraftSettings *m_Settings = nullptr;
++
++    // Input mirror state: the two keys are edge-detected here and counted, so a
++    // press that starts and ends inside one frame is not lost (the panel learned
++    // the same lesson: SDL can deliver both events before the frame polls).
++    bool m_EDown = false;
++    bool m_EscDown = false;
++    uint32_t m_KeyE = 0;
++    uint32_t m_KeyEsc = 0;
++    int32_t m_Wheel = 0;
++
++    bool m_InventoryOpen = false;
++    const char *m_LastInventoryLog = nullptr;
 +
 +    float m_LogTimer = -1.0f;
 +    uint64_t m_Publishes = 0;
@@ -1928,12 +2179,13 @@ index 0000000..ab08c82
 +#endif
 diff --git a/src/MinecraftOverlay.cpp b/src/MinecraftOverlay.cpp
 new file mode 100644
-index 0000000..76d5a40
+index 0000000..6109cd8
 --- /dev/null
 +++ b/src/MinecraftOverlay.cpp
-@@ -0,0 +1,746 @@
+@@ -0,0 +1,729 @@
 +#include "MinecraftOverlay.h"
 +
++#include "MinecraftCameraSync.h"
 +#include "MinecraftFontAtlas.h"
 +
 +#include <math.h>
@@ -2044,8 +2296,7 @@ index 0000000..76d5a40
 +CMinecraftOverlay::CMinecraftOverlay()
 +    : m_Settings(nullptr), m_FontTexture(nullptr), m_Material(nullptr), m_FontTextureId(0),
 +      m_MaterialId(0), m_CallbackInstalled(false), m_ResourcesFailed(false), m_Open(false),
-+      m_LeftDown(false), m_F1Down(false), m_EscapeDown(false), m_FrozenTime(false),
-+      m_SavedTimeScale(1.0f),
++      m_LeftDown(false), m_F1Down(false), m_EscapeDown(false),
 +      m_OpenedByTest(false), m_HoverRow(-1), m_HoverButton(0), m_Dirty(false), m_Scale(1.0f),
 +      m_CellWidth(8.0f), m_CellHeight(12.0f), m_PanelLeft(0.0f), m_PanelTop(0.0f),
 +      m_PanelRight(0.0f), m_PanelBottom(0.0f), m_Elapsed(0.0f), m_PointerStamp(-1.0f)
@@ -2156,34 +2407,13 @@ index 0000000..76d5a40
 +    m_Open = open;
 +    log_line("panel %s", open ? "opened" : "closed");
 +    if (!context) return;
-+    // Freeze the world by stopping time, not by pausing the context.
-+    //
-+    // CKContext::Pause() is the obvious call and the one the engine itself
-+    // makes, but CKContext::Process() skips ExecuteManagersPreProcess() while
-+    // the context is paused -- and the SDL input manager is a PreProcess
-+    // manager. A paused context stops receiving every mouse and key event,
-+    // including the click meant to toggle a row and the F1 meant to close the
-+    // panel: it could draw, but never react. (Measured: with the pause in
-+    // place, a real xdotool click on a row produced no press at all, and
-+    // every key press was equally absent.)
-+    //
-+    // Zero time scale leaves the context playing, so input keeps being pumped,
-+    // and multiplies every frame delta by zero, so the level stands still.
-+    CKTimeManager *timeManager = (CKTimeManager *)context->GetManagerByGuid(TIME_MANAGER_GUID);
-+    if (open)
-+    {
-+        if (timeManager && !m_FrozenTime)
-+        {
-+            m_SavedTimeScale = timeManager->GetTimeScaleFactor();
-+            timeManager->SetTimeScaleFactor(0.0f);
-+            m_FrozenTime = true;
-+        }
-+    }
-+    else if (m_FrozenTime)
-+    {
-+        if (timeManager) timeManager->SetTimeScaleFactor(m_SavedTimeScale);
-+        m_FrozenTime = false;
-+    }
++    // Freeze the world by stopping time, not by pausing the context: a paused
++    // context stops ExecuteManagersPreProcess, and the SDL input manager is a
++    // pre-process manager, so every mouse and key event would stop arriving --
++    // including the click meant to toggle a row. The gate counts reasons (the
++    // Minecraft inventory freezes the level the same way), so nesting the two
++    // overlays cannot leave the level frozen after both are closed.
++    CMinecraftPauseGate::Set(context, CMinecraftPauseGate::ePanel, open);
 +}
 +
 +void CMinecraftOverlay::Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds)
@@ -2238,9 +2468,7 @@ index 0000000..76d5a40
 +        // Re-assert the freeze every frame: a level script is free to set the
 +        // time scale back, and the panel is an overlay that must not let the
 +        // world start rolling underneath it.
-+        CKTimeManager *timeManager = (CKTimeManager *)context->GetManagerByGuid(TIME_MANAGER_GUID);
-+        if (timeManager && m_FrozenTime && timeManager->GetTimeScaleFactor() != 0.0f)
-+            timeManager->SetTimeScaleFactor(0.0f);
++        CMinecraftPauseGate::Set(context, CMinecraftPauseGate::ePanel, true);
 +    }
 +    // Pointer diagnostic: the panel cannot tell "the click missed" from "the
 +    // click never arrived" without printing what the input manager believes
@@ -2276,6 +2504,14 @@ index 0000000..76d5a40
 +    // The atlas is baked for a 640x480 window; the scale follows the window so
 +    // text stays legible without a per-resolution layout.
 +    float scale = (float)width / 640.0f * 1.6f;
++    // The panel has to fit the window it is drawn in: every metric below is a
++    // multiple of the text cell, so the whole panel scales linearly, and a row
++    // count that no longer fits (the inventory milestone added AimLift) would
++    // otherwise push the last rows off the bottom of the screen at 480 px tall.
++    // 8.58 cells of chrome + 1.9 per row, measured from the layout below.
++    const float cellsTall = 8.58f + 1.9f * (float)eMcRowCount;
++    const float fit = ((float)height - 8.0f) / ((float)mc_font::kCellHeight * cellsTall);
++    if (fit < scale) scale = fit;
 +    if (scale < 1.0f) scale = 1.0f;
 +    if (scale > 3.0f) scale = 3.0f;
 +    m_Scale = scale;
@@ -2658,13 +2894,11 @@ index 0000000..76d5a40
 +
 +void CMinecraftOverlay::Shutdown(CKContext *context)
 +{
-+    if (m_Open && m_FrozenTime && context)
++    if (m_Open)
 +    {
-+        CKTimeManager *timeManager = (CKTimeManager *)context->GetManagerByGuid(TIME_MANAGER_GUID);
-+        if (timeManager) timeManager->SetTimeScaleFactor(m_SavedTimeScale);
++        CMinecraftPauseGate::Set(context, CMinecraftPauseGate::ePanel, false);
 +    }
 +    m_Open = false;
-+    m_FrozenTime = false;
 +    m_CallbackInstalled = false;
 +    if (!context) return;
 +    if (m_FontTexture)
@@ -2680,10 +2914,10 @@ index 0000000..76d5a40
 +}
 diff --git a/src/MinecraftOverlay.h b/src/MinecraftOverlay.h
 new file mode 100644
-index 0000000..b4d11e7
+index 0000000..5dd57ac
 --- /dev/null
 +++ b/src/MinecraftOverlay.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,103 @@
 +#ifndef PLAYER_MINECRAFTOVERLAY_H
 +#define PLAYER_MINECRAFTOVERLAY_H
 +
@@ -2759,10 +2993,9 @@ index 0000000..b4d11e7
 +    bool m_LeftDown;
 +    bool m_F1Down;
 +    bool m_EscapeDown;
-+    // The panel freezes the world through the time scale factor (see SetOpen);
-+    // both the saved value and the flag have to survive until the panel closes.
-+    bool m_FrozenTime;
-+    float m_SavedTimeScale;
++    // The freeze itself lives in CMinecraftPauseGate (MinecraftCameraSync.h),
++    // because the Minecraft inventory freezes the level the same way and the two
++    // overlays can be open at once.
 +    bool m_OpenedByTest;
 +    int m_HoverRow;
 +    int m_HoverButton; // 0 = none, otherwise 1 + (row * 2) + side, 4 = reset
@@ -2790,10 +3023,10 @@ index 0000000..b4d11e7
 +#endif // PLAYER_MINECRAFTOVERLAY_H
 diff --git a/src/MinecraftSettings.cpp b/src/MinecraftSettings.cpp
 new file mode 100644
-index 0000000..d74170b
+index 0000000..99266f7
 --- /dev/null
 +++ b/src/MinecraftSettings.cpp
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,309 @@
 +#include "MinecraftSettings.h"
 +
 +#include <math.h>
@@ -2834,6 +3067,9 @@ index 0000000..d74170b
 +    {"Sensitivity", "BALLANCE_MC_STEVE_SENS", "Mouse sensitivity", false, 0.0005f, 0.0005f,
 +     0.02f,
 +     "; Radians of yaw/pitch per pixel of pointer motion.\n"},
++    {"AimLift", "BALLANCE_MC_AIM_LIFT", "Aim lift (degrees)", false, 1.0f, 0.0f, 30.0f,
++     "; Degrees the Minecraft camera is tilted up over the Ballance view direction.\n"
++     "; 0 puts the crosshair exactly on the ball (blocks land on it); 8 lifts it clear.\n"},
 +    {"Debug", "BALLANCE_MC_STEVE_DEBUG", "Debug log", true, 0.0f, 0.0f, 0.0f,
 +     "; Once a second, log where Steve is and what the gate decided.\n"},
 +};
@@ -2915,6 +3151,13 @@ index 0000000..d74170b
 +    // accepted against. Anything larger dwarfs the level.
 +    values.scale = 0.25f;
 +    values.sensitivity = 0.0025f;
++    // 20 degrees. Measured 2026-11-06 at level 8 (camera 10.3 blocks from the
++    // ball, 58 degree vertical field of view, 480 px tall): 8 degrees lifts the
++    // crosshair only ~20 px, which still sits inside the ball's silhouette (the
++    // ball is ~23 px across), while 20 degrees puts it ~51 px above the ball's
++    // centre -- clear of it. The row steps by one degree if a different
++    // separation is wanted.
++    values.aimLift = 20.0f;
 +    return values;
 +}
 +
@@ -2994,6 +3237,7 @@ index 0000000..d74170b
 +    {
 +        case eMcScale: return m_Values.scale;
 +        case eMcSensitivity: return m_Values.sensitivity;
++        case eMcAimLift: return m_Values.aimLift;
 +        default: return 0.0f;
 +    }
 +}
@@ -3007,6 +3251,7 @@ index 0000000..d74170b
 +    {
 +        case eMcScale: m_Values.scale = value; break;
 +        case eMcSensitivity: m_Values.sensitivity = value; break;
++        case eMcAimLift: m_Values.aimLift = value; break;
 +        default: break;
 +    }
 +}
@@ -3093,10 +3338,10 @@ index 0000000..d74170b
 +}
 diff --git a/src/MinecraftSettings.h b/src/MinecraftSettings.h
 new file mode 100644
-index 0000000..df634e6
+index 0000000..81d8b42
 --- /dev/null
 +++ b/src/MinecraftSettings.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,98 @@
 +#ifndef PLAYER_MINECRAFTSETTINGS_H
 +#define PLAYER_MINECRAFTSETTINGS_H
 +
@@ -3114,6 +3359,7 @@ index 0000000..df634e6
 +    eMcHideBall,    // HideBall=0        hide the ball so only Steve is left
 +    eMcScale,       // Scale=0.25        Ballance units per model unit
 +    eMcSensitivity, // Sensitivity=0.0025 radians of yaw/pitch per mouse pixel
++    eMcAimLift,     // AimLift=8         degrees the Minecraft camera is tilted up over the view
 +    eMcDebugLog,    // Debug=0           once a second, log what Steve is doing
 +    eMcRowCount
 +};
@@ -3143,6 +3389,12 @@ index 0000000..df634e6
 +        bool debugLog;
 +        float scale;
 +        float sensitivity;
++        // Degrees the Minecraft camera is tilted up over the Ballance view
++        // direction. The passthrough overlays one image on the other, so 0 puts
++        // the Minecraft crosshair exactly on the ball and a block placed there
++        // lands on it; this moves the crosshair off the ball without moving the
++        // Ballance frame. See MpCamera.h (AimLift).
++        float aimLift;
 +    };
 +
 +    CMinecraftSettings();
@@ -4666,10 +4918,10 @@ index 0000000..a9c5a67
 +#endif // PLAYER_MINECRAFTSTEVE_H
 diff --git a/src/MpCamera.h b/src/MpCamera.h
 new file mode 100644
-index 0000000..e44413c
+index 0000000..e538f71
 --- /dev/null
 +++ b/src/MpCamera.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,120 @@
 +#ifndef MPCAMERA_H
 +#define MPCAMERA_H
 +
@@ -4680,7 +4932,8 @@ index 0000000..e44413c
 +// the viewpoint the scene was just rendered from, plus where the player ball is,
 +// so the Minecraft client can render its own world from that same viewpoint.
 +//
-+//   [ MpCameraHeader 4096 B ]      (no slots; the payload is scalar)
++//   [ MpCameraHeader   4096 B ]    the camera, plus the input mirror (M1b)
++//     MpClientStatus  at 2048      written by Minecraft, read by this side
 +//
 +// The writer is this directory's MinecraftCameraSync.cpp, the reader is the Fabric
 +// mod. Linux: POSIX shm object /dev/shm/<name>. Windows: memory-mapped file in
@@ -4697,19 +4950,41 @@ index 0000000..e44413c
 +// UnitsPerBlock says how many units make one block (docs/scale-calibration.md:
 +// 4.0, i.e. the ball is one block across).
 +//
++// M1b (2026-11-06) added two things to the same object, both in the space the
++// version-1 payload left as Reserved:
++//
++//   * AimLift -- the number of radians the Minecraft camera is tilted up above
++//     the Ballance view direction. The passthrough overlays one image on the
++//     other, so the Minecraft crosshair used to sit exactly on the ball, and a
++//     block placed at the crosshair landed on the ball. Tilting the Minecraft
++//     camera (not the Ballance one) lifts the crosshair off the ball while the
++//     Ballance frame keeps the viewpoint it was rendered from. The panel row
++//     AimLift writes this number, so it is tunable while playing.
++//
++//   * the input mirror -- pointer position/buttons/wheel and the two keys the
++//     Minecraft client cannot receive on its own, because the Ballance window
++//     owns the keyboard. Minecraft publishes back whether the inventory it
++//     opened is still up (MpClientStatus.GuiOpen); that is what tells this side
++//     to freeze the level and hand the pointer over.
++//
 +// Keep in sync with tools/passthrough/mpcamera.h (the tools-side mirror) and with
 +// McCameraChannel.java (the reader, which hardcodes these offsets).
 +
 +#include <stdint.h>
 +
 +#define MPC_MAGIC 0x3143504Du // 'M''P''C''1' little endian
-+#define MPC_VERSION 1u
++#define MPC_VERSION 2u
 +#define MPC_BYTES 4096u
 +
 +// Flags
 +#define MPC_FLAG_VALID 0x1u      // Eye/Forward/Up/FovY are meaningful
 +#define MPC_FLAG_BALL 0x2u       // Ball is meaningful
 +#define MPC_FLAG_PAUSED 0x4u     // the level is not advancing
++
++// Pointer buttons, as published in InputButtons.
++#define MPC_BUTTON_LEFT 0x1u
++#define MPC_BUTTON_RIGHT 0x2u
++#define MPC_BUTTON_MIDDLE 0x4u
 +
 +typedef struct MpCameraHeader {
 +    uint32_t Magic;         // MPC_MAGIC
@@ -4729,11 +5004,41 @@ index 0000000..e44413c
 +    float UnitsPerBlock;    // 4.0 (docs/scale-calibration.md)
 +    uint32_t Frame;         // Ballance frame counter
 +    uint64_t TimeNs;        // CLOCK_MONOTONIC of the publish
-+    uint32_t Reserved[30];  // keeps the struct well inside MPC_BYTES
++    // --- M1b. These sit where version 1 had Reserved[0..], so every offset
++    // above them is unchanged and an older reader simply ignores them.
++    float AimLift;          // radians the Minecraft camera is tilted up; 0 = on the ball
++    float MouseX;           // pointer in the Ballance window, 0..1, origin top left
++    float MouseY;
++    uint32_t InputButtons;  // MPC_BUTTON_*
++    int32_t Wheel;          // wheel notches accumulated since the writer started
++    uint32_t KeyE;          // monotonic press counters; the reader keeps its own copy
++    uint32_t KeyEsc;
++    uint32_t Reserved[22];  // keeps the struct well inside MPC_BYTES
 +} MpCameraHeader;
 +
++// Minecraft -> Ballance, at MPS_OFFSET in the same object. The camera channel
++// cannot carry this: it is written by the other process, and the reader of this
++// side needs to know whether the inventory is still up before it can decide to
++// freeze the level. Own seqlock: Magic is written once, Seq last.
++typedef struct MpClientStatus {
++    uint32_t Magic;         // MPS_MAGIC, written once the client is alive
++    uint32_t Seq;           // seqlock counter, release-published last
++    uint32_t GuiOpen;       // 1 while the passthrough inventory is on screen
++    uint32_t Ticks;         // client ticks since start
++    uint32_t KeyE;          // the press counters the client has acted on
++    uint32_t KeyEsc;
++    uint32_t GuiWidth;      // the inventory's coordinate space, GUI pixels
++    uint32_t GuiHeight;
++    uint32_t Reserved[8];
++} MpClientStatus;
++
++#define MPS_OFFSET 2048u
++#define MPS_MAGIC 0x3153504Du // 'M''P''S''1'
++
 +#if defined(__cplusplus)
-+static_assert(sizeof(MpCameraHeader) <= MPC_BYTES, "MpCameraHeader must fit in MPC_BYTES");
++static_assert(sizeof(MpCameraHeader) <= MPS_OFFSET, "MpCameraHeader must not reach MpClientStatus");
++static_assert(MPS_OFFSET + sizeof(MpClientStatus) <= MPC_BYTES,
++              "MpClientStatus must fit in MPC_BYTES");
 +#endif
 +
 +#endif // MPCAMERA_H

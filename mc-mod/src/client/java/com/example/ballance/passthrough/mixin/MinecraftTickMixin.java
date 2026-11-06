@@ -2,6 +2,7 @@ package com.example.ballance.passthrough.mixin;
 
 import com.example.ballance.passthrough.CameraSync;
 import com.example.ballance.passthrough.McWorldBootstrap;
+import com.example.ballance.passthrough.PassthroughInput;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -20,5 +21,8 @@ public class MinecraftTickMixin {
         final Minecraft client = (Minecraft) (Object) this;
         McWorldBootstrap.onClientTick(client);
         CameraSync.onClientTick(client);
+        // M1b: the E key, the pointer and the wheel, all arriving through the
+        // Ballance camera channel (this window never sees them otherwise).
+        PassthroughInput.onClientTick(client);
     }
 }

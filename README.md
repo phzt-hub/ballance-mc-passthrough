@@ -29,6 +29,7 @@
 | PoC-2 | 动态 obstacle 加/删 + 球能撞上 | 球被自己加的盒子挡住 |
 | M0 | 共享内存链路 + 全屏贴图 | Ballance 窗口里看到 MC 画面 |
 | M1 🔄 | 相机 + 球位 = Steve 位 | 球滚，MC 世界跟着走不漂 —— 数据通路已通（阀门见 [docs/m1-camera.md](docs/m1-camera.md)），客户端内应用待实拍 |
+| **M1b** ✅ | 反向输入：Ballance 窗口的 E / 鼠标 / 滚轮驱动 MC 物品栏，准星前移 | E 开创造物品栏、点物品进快捷栏、换页签、滚列表（[docs/m1b-input.md](docs/m1b-input.md)） |
 | **M2a** ✅ | 虚空世界 + 去天空（MC 侧） | MC 那一帧只剩方块/实体，背景 alpha=0（[docs/mc-void-world.md](docs/mc-void-world.md)） |
 | M2b | Ballance 侧开 alpha 混合 | 球道从 MC 帧的透明处透出来 |
 | M2c | 深度合成（重投影） | 柱子能挡住 MC 的墙 |
