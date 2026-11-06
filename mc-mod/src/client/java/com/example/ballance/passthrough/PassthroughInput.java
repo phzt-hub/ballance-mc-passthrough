@@ -7,6 +7,11 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.MouseButtonInfo;
+import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.phys.HitResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,6 +63,10 @@ public final class PassthroughInput {
     private static boolean focusPolicyApplied;
     private static net.minecraft.world.item.ItemStack lastCarried =
             net.minecraft.world.item.ItemStack.EMPTY;
+    /** When the channel last moved, so a dead Ballance does not leave a key held down. */
+    private static int lastPoseSeq;
+    private static long lastPoseNanos;
+    private static final long STALE_NANOS = 2_000_000_000L;
 
     private PassthroughInput() {
     }
@@ -81,6 +90,17 @@ public final class PassthroughInput {
         }
         final McCameraChannel.Pose pose = McCameraChannel.read();
         if (pose == null) {
+            releaseButtons();
+            return;
+        }
+        if (pose.seq() != lastPoseSeq) {
+            lastPoseSeq = pose.seq();
+            lastPoseNanos = System.nanoTime();
+        } else if (System.nanoTime() - lastPoseNanos > STALE_NANOS) {
+            // Ballance stopped publishing (it exited or was killed). A key it was holding
+            // would otherwise stay held for ever: MouseHandler's own state is not reset when
+            // the window it belongs to goes away.
+            releaseButtons();
             return;
         }
         ++ticks;
@@ -103,8 +123,7 @@ public final class PassthroughInput {
                 }
             }
         } else {
-            seenButtons = pose.buttons();
-            seenWheel = pose.wheel();
+            forwardWorldInput(client, pose);
             lastMouseX = Double.NaN;
             lastMouseY = Double.NaN;
         }
@@ -231,6 +250,169 @@ public final class PassthroughInput {
                         delta / McCameraChannel.WHEEL_UNITS_PER_NOTCH);
             }
         }
+    }
+
+    /**
+     * The world half of the pointer: the same buttons, with no screen to receive them.
+     *
+     * <p>Deliberately not {@code MouseHandler.onButton}. That method's first move for a press
+     * with no screen open is {@code grabMouse()}, and the pointer belongs to the Ballance window
+     * here -- there is nothing for Minecraft to grab. What onButton does after that is three
+     * lines, and those are the three lines used here: set the mouse key down, hand it one click.
+     * {@code Minecraft.handleKeybinds} turns that into {@code startAttack} / {@code startUseItem}
+     * on its next pass, exactly as it would for a real press.
+     */
+    private static void forwardWorldInput(Minecraft client, McCameraChannel.Pose pose) {
+        if (client.player == null || client.level == null || !pose.hasBall()) {
+            // Nothing to act on while Ballance is still in its menus: the camera channel is
+            // publishing from the first frame, but a click on START is not a click in the
+            // world. hasBall() is what says a level is running.
+            seenButtons = pose.buttons();
+            seenWheel = pose.wheel();
+            return;
+        }
+        final int buttons = pose.buttons();
+        final int changed = buttons ^ seenButtons;
+
+        if ((changed & McCameraChannel.BUTTON_LEFT) != 0) {
+            final boolean down = (buttons & McCameraChannel.BUTTON_LEFT) != 0;
+            seenButtons = down ? (seenButtons | McCameraChannel.BUTTON_LEFT)
+                    : (seenButtons & ~McCameraChannel.BUTTON_LEFT);
+            mouseKey(1, down);
+            LOGGER.info("world left {} aim={} held={}", down ? "press" : "release",
+                    describe(aimResult(client)), client.player.getMainHandItem());
+        }
+        if ((changed & McCameraChannel.BUTTON_RIGHT) != 0) {
+            final boolean down = (buttons & McCameraChannel.BUTTON_RIGHT) != 0;
+            seenButtons = down ? (seenButtons | McCameraChannel.BUTTON_RIGHT)
+                    : (seenButtons & ~McCameraChannel.BUTTON_RIGHT);
+            if (down) {
+                // A void world has nothing to place against: vanilla finds no block under the
+                // aim and falls through to useItem, where a plain BlockItem does nothing. So the
+                // block is spawned at the end of the reach instead. Once one exists the ray hits
+                // it and the vanilla branch takes over, with no special case left behind.
+                if (aimingAtBlock(client) || !placeAtAim(client)) {
+                    mouseKey(3, true);
+                }
+            } else {
+                mouseKey(3, false);
+            }
+            LOGGER.info("world right {} aim={} held={}", down ? "press" : "release",
+                    describe(aimResult(client)), client.player.getMainHandItem());
+        }
+        if ((changed & McCameraChannel.BUTTON_MIDDLE) != 0) {
+            final boolean down = (buttons & McCameraChannel.BUTTON_MIDDLE) != 0;
+            seenButtons = down ? (seenButtons | McCameraChannel.BUTTON_MIDDLE)
+                    : (seenButtons & ~McCameraChannel.BUTTON_MIDDLE);
+            // Pick block. Nothing to prove beyond it arriving; the log of the held stack after
+            // the middle click does that.
+            mouseKey(2, down);
+        }
+
+        // With no screen open the wheel is the hotbar (the other branch of
+        // MouseHandler.onScroll): that is also how the slot holding the block gets selected
+        // while playing, without opening the inventory.
+        final int wheel = pose.wheel();
+        if (wheel != seenWheel) {
+            final int delta = wheel - seenWheel;
+            seenWheel = wheel;
+            if (delta > -1200 && delta < 1200) {
+                client.mouseHandler.onScroll(client.getWindow().handle(), 0.0,
+                        delta / McCameraChannel.WHEEL_UNITS_PER_NOTCH);
+            }
+        }
+    }
+
+    /** Presses a mouse key the way {@code MouseHandler.onButton} leaves it for a world click. */
+    private static void mouseKey(int button, boolean down) {
+        final InputConstants.Key key = InputConstants.Type.MOUSE.getOrCreate(button);
+        KeyMapping.set(key, down);
+        if (down) {
+            KeyMapping.click(key);
+        }
+    }
+
+    /** Lets go of everything, for when the Ballance side stops publishing. */
+    private static void releaseButtons() {
+        if (seenButtons == 0) {
+            return;
+        }
+        seenButtons = 0;
+        mouseKey(1, false);
+        mouseKey(2, false);
+        mouseKey(3, false);
+    }
+
+    /**
+     * The block interaction ray, from the player's eye along the aim Minecraft itself uses --
+     * the Ballance view direction tilted by the panel's aim lift (see {@code CameraSync.aim}),
+     * which is the rotation the crosshair is drawn for.
+     */
+    private static HitResult aimResult(Minecraft client) {
+        if (client.player == null) {
+            return null;
+        }
+        return client.player.pick(CameraSync.REACH_BLOCKS, 0.0f, false);
+    }
+
+    private static boolean aimingAtBlock(Minecraft client) {
+        final HitResult hit = aimResult(client);
+        return hit != null && hit.getType() == HitResult.Type.BLOCK;
+    }
+
+    private static String describe(HitResult hit) {
+        if (hit == null) {
+            return "none";
+        }
+        if (hit.getType() == HitResult.Type.BLOCK
+                && hit instanceof net.minecraft.world.phys.BlockHitResult block) {
+            return block.getBlockPos() + "/" + block.getDirection();
+        }
+        return hit.getType().toString();
+    }
+
+    /**
+     * Puts the held block at the end of the reach when there is nothing under the aim.
+     *
+     * <p>This is the one non-vanilla branch of the feature. It spawns the block where the
+     * crosshair is drawn for -- {@code CameraSync.crosshairOffsetPixels} measures that
+     * placement with the same reach -- so "aim here, it appears there" stays true even with
+     * no block to place against.
+     *
+     * <p>Set on the integrated server, not the client: a client-side setBlock never reaches
+     * the server and the block is erased by the next chunk update.
+     *
+     * @return whether a block was placed
+     */
+    private static boolean placeAtAim(Minecraft client) {
+        if (client.player == null || client.level == null) {
+            return false;
+        }
+        if (!(client.player.getMainHandItem().getItem() instanceof BlockItem item)) {
+            return false;
+        }
+        final var eye = client.player.getEyePosition();
+        final var target = eye.add(client.player.getLookAngle().scale(CameraSync.REACH_BLOCKS));
+        final BlockPos pos = BlockPos.containing(target);
+        final IntegratedServer server = client.getSingleplayerServer();
+        if (server == null) {
+            return false;
+        }
+        final ServerLevel level = server.getLevel(client.level.dimension());
+        if (level == null) {
+            return false;
+        }
+        final var state = item.getBlock().defaultBlockState();
+        if (!level.setBlockAndUpdate(pos, state)) {
+            return false;
+        }
+        LOGGER.info("placed {} at {} eye=({},{},{}) target=({},{},{})",
+                state.getBlock(), pos,
+                String.format("%.2f", eye.x), String.format("%.2f", eye.y),
+                String.format("%.2f", eye.z),
+                String.format("%.2f", target.x), String.format("%.2f", target.y),
+                String.format("%.2f", target.z));
+        return true;
     }
 
     /**

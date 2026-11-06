@@ -30,8 +30,12 @@ public final class CameraSync {
 
     private static final boolean ENABLED = !"0".equals(System.getenv("BALLANCE_MC_CAMERA"));
 
-    /** How far a block placed at the end of the reach lands from the eye, in blocks. */
-    private static final double REACH_BLOCKS = 4.5;
+    /**
+     * How far a block placed at the end of the reach lands from the eye, in blocks. Shared with
+     * {@code PassthroughInput}, which spawns the first block of a void world at exactly this
+     * distance: the crosshair is drawn for this placement, so the two must not drift apart.
+     */
+    static final double REACH_BLOCKS = 4.5;
 
     private static volatile McCameraChannel.Pose framePose;
     private static boolean announced;

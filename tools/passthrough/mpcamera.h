@@ -77,7 +77,7 @@ typedef struct MpCameraHeader {
     float Near;             // front plane, units
     float Far;              // back plane, units
     float Ball[3];          // player ball centre, units
-    float UnitsPerBlock;    // 4.0 (docs/scale-calibration.md)
+    float UnitsPerBlock;    // 5.0 = one block, drawn scale (the ball is 4.0 u across)
     uint32_t Frame;         // Ballance frame counter
     uint64_t TimeNs;        // CLOCK_MONOTONIC of the publish
     // --- M1b. These sit where version 1 had Reserved[0..], so every offset

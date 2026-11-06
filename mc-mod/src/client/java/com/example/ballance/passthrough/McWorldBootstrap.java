@@ -170,6 +170,11 @@ public final class McWorldBootstrap {
             return;
         }
         inWorldHandled = true;
+        // The selected hotbar slot is player data and survives a restart, so whoever scrolled
+        // to an empty slot last session comes back with an empty hand -- and the first right
+        // click then does nothing at all, which reads as "placing is broken". Reset it on both
+        // sides: dressScene resets the server copy, and that one is never pushed to the client.
+        client.player.getInventory().setSelectedSlot(0);
         LOGGER.info("in world: dimension={} pos=({}, {}, {}) gameType={} passthrough={}",
                 client.level.dimension().identifier(),
                 String.format("%.1f", client.player.getX()),
@@ -210,6 +215,10 @@ public final class McWorldBootstrap {
             // 虚空里出生点在 y=-64 附近（FlatLevelSource.getSpawnHeight 取世界底部），
             // 掉下去就再也回不来；顺手放到 M1 锚点 (0,100,0)，和 BALLANCE_MC_ANCHOR 对齐。
             player.teleportTo(0.5, 100.0, 0.5);
+            // The selected slot is player data, so it survives a restart: whoever scrolled to
+            // an empty slot last time comes back with an empty hand, and the first right click
+            // then does nothing at all. Start on the first slot every time.
+            player.getInventory().setSelectedSlot(0);
             LOGGER.info("scene: player {} set to creative + flying at 0,100,0", player.getName().getString());
         }
     }

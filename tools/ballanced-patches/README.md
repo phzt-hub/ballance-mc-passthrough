@@ -94,7 +94,7 @@ its own `base_commit`; the resulting tree is byte-identical to the dirty tree
 untracked and were excluded from that comparison.
 
 ```
-Player.patch          base e5073295 15 files  5067 lines
+Player.patch          base e5073295 15 files  5070 lines
 BuildingBlocks.patch  base 5b833b92  4 files  790 lines
 RenderEngine.patch    base 049c78b3 15 files  1091 lines
 SdlInputManager.patch base 368d4143  2 files   74 lines

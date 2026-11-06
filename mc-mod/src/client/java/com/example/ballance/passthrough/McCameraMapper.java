@@ -25,7 +25,7 @@ public final class McCameraMapper {
     private static double anchorX;
     private static double anchorY = 100.0;
     private static double anchorZ;
-    private static float unitsPerBlock = 4.0f;
+    private static float unitsPerBlock = 5.0f;
 
     static {
         final String spec = System.getenv("BALLANCE_MC_ANCHOR");
@@ -52,7 +52,7 @@ public final class McCameraMapper {
             return;
         }
         final double[] reference = pose.hasBall() ? pose.ball() : pose.eye();
-        unitsPerBlock = pose.unitsPerBlock() > 0.0f ? pose.unitsPerBlock() : 4.0f;
+        unitsPerBlock = pose.unitsPerBlock() > 0.0f ? pose.unitsPerBlock() : 5.0f;
         originX = reference[0];
         originY = reference[1];
         originZ = reference[2];

@@ -1243,10 +1243,10 @@ index 3b54c38..5526b84 100644
  #endif /* PLAYER_GAMEPLAYER_H */
 diff --git a/src/MinecraftCameraSync.cpp b/src/MinecraftCameraSync.cpp
 new file mode 100644
-index 0000000..0772562
+index 0000000..932dd4b
 --- /dev/null
 +++ b/src/MinecraftCameraSync.cpp
-@@ -0,0 +1,643 @@
+@@ -0,0 +1,646 @@
 +#include "MinecraftCameraSync.h"
 +
 +#include "MinecraftSettings.h"
@@ -1759,7 +1759,10 @@ index 0000000..0772562
 +    header.Version = MPC_VERSION;
 +    header.Width = (uint32_t)renderContext->GetWidth();
 +    header.Height = (uint32_t)renderContext->GetHeight();
-+    header.UnitsPerBlock = 4.0f; // docs/scale-calibration.md
++    // The scale the passthrough draws with: one Minecraft block is five Ballance units.
++    // (docs/scale-calibration.md calibrates the ball at 4.0 u across; at 5 u per block the
++    // ball is 0.8 blocks, which is the ratio the user picked after seeing it on screen.)
++    header.UnitsPerBlock = 5.0f;
 +    header.Frame = m_Frame;
 +
 +    // The attached camera is what the scene draws from, and its transform is
@@ -4918,7 +4921,7 @@ index 0000000..a9c5a67
 +#endif // PLAYER_MINECRAFTSTEVE_H
 diff --git a/src/MpCamera.h b/src/MpCamera.h
 new file mode 100644
-index 0000000..e538f71
+index 0000000..98c7dcb
 --- /dev/null
 +++ b/src/MpCamera.h
 @@ -0,0 +1,120 @@
@@ -4947,8 +4950,8 @@ index 0000000..e538f71
 +//
 +// Coordinates are Ballance world units (Virtools, row vectors, left handed,
 +// +Z forward, +Y up). Converting to Minecraft blocks is the reader's job;
-+// UnitsPerBlock says how many units make one block (docs/scale-calibration.md:
-+// 4.0, i.e. the ball is one block across).
++// UnitsPerBlock says how many units make one block (docs/scale-calibration.md measured
++// the ball at 4.0 u across; the passthrough uses 5.0, i.e. the ball is 0.8 of a block).
 +//
 +// M1b (2026-11-06) added two things to the same object, both in the space the
 +// version-1 payload left as Reserved:
@@ -5001,7 +5004,7 @@ index 0000000..e538f71
 +    float Near;             // front plane, units
 +    float Far;              // back plane, units
 +    float Ball[3];          // player ball centre, units
-+    float UnitsPerBlock;    // 4.0 (docs/scale-calibration.md)
++    float UnitsPerBlock;    // 5.0 = one block, drawn scale (the ball is 4.0 u across)
 +    uint32_t Frame;         // Ballance frame counter
 +    uint64_t TimeNs;        // CLOCK_MONOTONIC of the publish
 +    // --- M1b. These sit where version 1 had Reserved[0..], so every offset
