@@ -83,10 +83,10 @@ index 3a9dd4e..ebd5732 100644
          CKRE_PROFILE_SCOPE("CKRE.SDL.WaitInflight");
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPassthrough.h b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPassthrough.h
 new file mode 100644
-index 0000000..a182209
+index 0000000..4208696
 --- /dev/null
 +++ b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuPassthrough.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,72 @@
 +#ifndef CKSDLGPUPASSTHROUGH_H
 +#define CKSDLGPUPASSTHROUGH_H
 +
@@ -125,6 +125,9 @@ index 0000000..a182209
 +    CKDWORD Texture = 0;
 +    CKDWORD TextureWidth = 0;
 +    CKDWORD TextureHeight = 0;
++    // FrameId of the newest frame this consumer has taken into account: either one
++    // it uploaded, or the one already sitting in the mailbox when it mapped it.
++    // A frame published before the mailbox was opened is never drawn (try_map).
 +    uint32_t LastFrameId = 0;
 +    // TRUE once a frame has been uploaded and drawn at least once, so ticks that
 +    // carry no new data can keep re-presenting the cached texture.
@@ -490,10 +493,10 @@ index 08101db..090728e 100644
  
 diff --git a/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerPassthrough.cpp b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerPassthrough.cpp
 new file mode 100644
-index 0000000..cbc422c
+index 0000000..1e0084e
 --- /dev/null
 +++ b/src/CKRasterizer/CKSdlGpuRasterizer/Rasterizer/CKSdlGpuRasterizerPassthrough.cpp
-@@ -0,0 +1,458 @@
+@@ -0,0 +1,476 @@
 +// Host side of the Ballance <-> Minecraft passthrough (milestone M0).
 +//
 +// Reads the frame mailbox described by mpframe.h and draws the newest frame as
@@ -794,6 +797,24 @@ index 0000000..cbc422c
 +    state.ReportedMissing = FALSE;
 +    state.ReportedBadHeader = FALSE;
 +    state.LastStaleCheckMs = now_ms();
++    // Adopt whatever the producer had already published as the baseline. The
++    // mailbox outlives the process that filled it (on Windows the .dat file simply
++    // stays on disk), so the first tick of a fresh run can find a frame from an
++    // earlier session. Drawing that one puts the old picture over the game until
++    // the producer publishes again - and when no producer runs at all, which is
++    // the usual order (Ballance first, Minecraft later), it stays there for the
++    // whole session. That is the 2026-11-07 report: the game opened on the
++    // previous run's Minecraft main menu, stretched to the window, forever.
++    // Baselining the id instead of leaving it at 0 makes the first frame drawn be
++    // one written after this point; a frame published a moment later is picked up
++    // by the next tick.
++    const MpFrameHeader *header = static_cast<const MpFrameHeader *>(state.Base);
++    const uint32_t baseline = load_acquire(&header->FrameId);
++    if (baseline != 0) {
++        state.LastFrameId = baseline;
++        log_line("baseline frame %u (published before this run, not drawn)",
++                 (unsigned)baseline);
++    }
 +    log_line("mapped %s (%zu bytes)", mailbox_label(state), state.Bytes);
 +    return TRUE;
 +}
