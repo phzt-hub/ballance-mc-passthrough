@@ -71,6 +71,33 @@ public final class McCameraMapper {
         ready = true;
     }
 
+    /**
+     * Moves the mapping origin onto this sample, so the ball it carries maps to the anchor again.
+     *
+     * <p>Called when a level starts. Ballance levels live at their own coordinates (level 1's ball
+     * sits at z = -153, level 8's somewhere else entirely), so keeping the first level's origin
+     * would land every later level hundreds of blocks away from the anchor -- and from the chunks
+     * the client already has. Every level therefore begins at the anchor, in a world of its own.
+     */
+    public static synchronized void reanchor(McCameraChannel.Pose pose) {
+        if (pose == null) {
+            return;
+        }
+        final double[] reference = pose.hasBall() ? pose.ball() : pose.eye();
+        if (pose.unitsPerBlock() > 0.0f) {
+            unitsPerBlock = pose.unitsPerBlock();
+        }
+        originX = reference[0];
+        originY = reference[1];
+        originZ = reference[2];
+        ready = true;
+    }
+
+    /** Serialises the origin for the log: "origin moved" is a diff, not an opinion. */
+    public static synchronized String origin() {
+        return String.format("(%.2f, %.2f, %.2f)", originX, originY, originZ);
+    }
+
     public static boolean ready() {
         return ready;
     }

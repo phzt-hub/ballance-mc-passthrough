@@ -5,7 +5,6 @@ import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.LevelSettings;
@@ -25,17 +24,26 @@ import net.minecraft.world.level.storage.LevelStorageSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
+import java.util.stream.Stream;
 
 /**
- * 启动时把客户端送进「虚空世界」，并对这个世界做一次性布景（milestone M2a）。
+ * 把客户端送进「虚空世界」，并对这个世界做一次性布景（milestone M2a）。
  *
- * <p>世界 id 默认 {@code passthrough}：第一次运行**新建**，之后每次**直接打开**。
- * 生成器是超平坦的 the_void 预设（一层空气 + the_void 生物群系，没有结构、没有湖），
+ * <p>生成器是超平坦的 the_void 预设（一层空气 + the_void 生物群系，没有结构、没有湖），
  * 也就是「进去以后脚下什么都没有」，和菜单里的 单人游戏 → 世界类型 → 超平坦 →
  * 预设 the_void 是同一个东西，只是不用手点。
+ *
+ * <p><b>2026-11-07 起每个关卡一个全新的世界</b>：不再复用一个叫 {@code passthrough} 的存档，
+ * 每次「从菜单进关卡」都由 {@link LevelSession} 请求这里删掉旧档、用新 id 重新建一个
+ * （{@code passthrough}、{@code passthrough-2}、……），所以上一个关卡搭的东西不会出现在
+ * 下一个关卡里。存档名带序号而不是原地删除重建，是因为删除必须等旧的服务端线程真的停下来，
+ * 而「新建一个不同 id 的世界」不需要那个时序：新世界加载完，旧目录再删就绝不会被写回。
+ * 启动时也会先清掉上一次会话留下的所有 {@code passthrough*}，所以关掉重开同样是干净的。
  *
  * <p>为什么不用 {@code --quickPlaySingleplayer}：loom 把程序参数写进 argfile，
  * Gradle 的 {@code --args} 到不了游戏（2026-11-05 实测，日志里是 "Completely ignored
@@ -45,8 +53,10 @@ import java.util.List;
  * <p>环境变量：
  * <ul>
  *   <li>{@code BALLANCE_MC_WORLD=<存档 id>}：不建虚空世界，直接打开这个已有存档
- *       （老行为，做对照实验用；这个存档不会被布景、也不会去天空）；</li>
- *   <li>{@code BALLANCE_MC_VOID_WORLD=<id>}：虚空世界的存档名，默认 {@code passthrough}；</li>
+ *       （老行为，做对照实验用；这个存档不会被布景、也不会去天空、更不会被删）；</li>
+ *   <li>{@code BALLANCE_MC_VOID_WORLD=<id>}：虚空世界的存档名基名，默认 {@code passthrough}；</li>
+ *   <li>{@code BALLANCE_MC_REUSE_WORLD=1}：启动时复用已有的 {@code <id>} 存档，不删旧档
+ *       （调画面时省一次加载；每关换新世界的逻辑仍然生效）；</li>
  *   <li>{@code BALLANCE_MC_VOID=0}：整个自动开世界关掉，客户端停在标题界面。</li>
  * </ul>
  */
@@ -54,8 +64,9 @@ public final class McWorldBootstrap {
     private static final Logger LOGGER = LoggerFactory.getLogger("ballance-passthrough-world");
 
     private static final String EXPLICIT_WORLD = System.getenv("BALLANCE_MC_WORLD");
-    private static final String VOID_WORLD = readWorldId();
+    private static final String BASE_WORLD = readWorldId();
     private static final boolean ENABLED = !"0".equals(System.getenv("BALLANCE_MC_VOID"));
+    private static final boolean REUSE_WORLD = envFlag("BALLANCE_MC_REUSE_WORLD");
 
     /** 标题界面起来、资源加载完再动手；6 秒是 2026-11-05 实测能稳定进世界的值。 */
     private static final long DELAY_NANOS = 6_000_000_000L;
@@ -64,8 +75,11 @@ public final class McWorldBootstrap {
     private static boolean attempted;
     private static boolean inWorldHandled;
 
-    /** 这次会话是不是由我们自己打开的虚空世界（决定要不要布景 / 去天空）。 */
+    /** 这次会话是不是由我们自己打开的虚空世界（决定要不要布景 / 去天空 / 换关时重建）。 */
     private static boolean passthroughWorld;
+
+    /** 当前正在玩的存档 id，由 {@link #createFreshWorld} 记下，换关时用它来删旧档。 */
+    private static String currentWorldId;
 
     private McWorldBootstrap() {
     }
@@ -78,11 +92,29 @@ public final class McWorldBootstrap {
         return value.trim();
     }
 
+    private static boolean envFlag(String name) {
+        final String value = System.getenv(name);
+        return value != null && !value.isBlank()
+                && !value.equals("0") && !value.equalsIgnoreCase("off") && !value.equalsIgnoreCase("false");
+    }
+
+    public static boolean isPassthroughWorld() {
+        return passthroughWorld;
+    }
+
+    /** The save id the current world was created with, or null when it is not ours. */
+    public static String currentWorldId() {
+        return currentWorldId;
+    }
+
     public static void onClientTick(Minecraft client) {
         if (client.level != null) {
             onInWorld(client);
             return;
         }
+        // No world: the next one needs dressing too. This is what makes a level's own
+        // freshly created world get the game rules, the flying player and the slot reset.
+        inWorldHandled = false;
         if (!ENABLED || attempted) {
             return;
         }
@@ -99,31 +131,129 @@ public final class McWorldBootstrap {
 
     private static void openWorld(Minecraft client) {
         if (EXPLICIT_WORLD != null && !EXPLICIT_WORLD.isBlank()) {
-            LOGGER.info("opening world \"{}\" (BALLANCE_MC_WORLD)", EXPLICIT_WORLD);
+            LOGGER.info("opening world \"{}\" (BALLANCE_MC_WORLD, never recreated)", EXPLICIT_WORLD);
             client.createWorldOpenFlows().openWorld(EXPLICIT_WORLD,
                     () -> LOGGER.warn("world \"{}\" could not be opened", EXPLICIT_WORLD));
             return;
         }
-        if (hasLevelData(client, VOID_WORLD)) {
-            LOGGER.info("opening void world \"{}\"", VOID_WORLD);
+        if (REUSE_WORLD && hasLevelData(client, BASE_WORLD)) {
+            LOGGER.info("opening void world \"{}\" (BALLANCE_MC_REUSE_WORLD)", BASE_WORLD);
             passthroughWorld = true;
+            currentWorldId = BASE_WORLD;
             PassthroughScene.markPassthroughWorld();
-            client.createWorldOpenFlows().openWorld(VOID_WORLD, () -> {
-                LOGGER.warn("void world \"{}\" could not be opened", VOID_WORLD);
+            client.createWorldOpenFlows().openWorld(BASE_WORLD, () -> {
+                LOGGER.warn("void world \"{}\" could not be opened", BASE_WORLD);
                 passthroughWorld = false;
             });
             return;
         }
-        LOGGER.info("creating void world \"{}\"", VOID_WORLD);
+        // A new session starts from nothing: the saves the last one left behind are ours and
+        // disposable, and leaving them would put their blocks in this session's first level.
+        final int removed = deleteOldWorlds(client);
+        if (removed > 0) {
+            LOGGER.info("removed {} void save(s) from an earlier session", removed);
+        }
+        createFreshWorld(client);
+    }
+
+    /**
+     * Creates one more void world, with an id nothing else is using, and returns that id.
+     *
+     * <p>Called on startup and again for every level entered from Ballance's menu
+     * ({@link LevelSession}). The world is a fresh save with a new random seed; the previous one
+     * is deleted by the caller once this one is up, so the two never share a directory.
+     */
+    public static String createFreshWorld(Minecraft client) {
+        final String id = nextWorldId(client);
+        LOGGER.info("creating fresh void world \"{}\"", id);
         passthroughWorld = true;
+        currentWorldId = id;
         PassthroughScene.markPassthroughWorld();
         client.createWorldOpenFlows().createFreshLevel(
-                VOID_WORLD,
-                new LevelSettings(VOID_WORLD, GameType.CREATIVE,
+                id,
+                new LevelSettings(id, GameType.CREATIVE,
                         LevelSettings.DifficultySettings.DEFAULT, true, WorldDataConfiguration.DEFAULT),
                 new WorldOptions(WorldOptions.randomSeed(), false, false),
                 McWorldBootstrap::voidDimensions,
                 null);
+        return id;
+    }
+
+    private static String nextWorldId(Minecraft client) {
+        final LevelStorageSource source = client.getLevelSource();
+        for (int n = 1; n <= 999; n++) {
+            final String id = n == 1 ? BASE_WORLD : BASE_WORLD + "-" + n;
+            if (!Files.exists(source.getLevelPath(id))) {
+                return id;
+            }
+        }
+        return BASE_WORLD + "-" + System.currentTimeMillis();
+    }
+
+    /** True for the save ids this mod owns: {@code <base>} and {@code <base>-<digits>}. */
+    public static boolean isOwnWorld(String id) {
+        if (id == null) {
+            return false;
+        }
+        if (id.equals(BASE_WORLD)) {
+            return true;
+        }
+        if (!id.startsWith(BASE_WORLD + "-")) {
+            return false;
+        }
+        final String tail = id.substring(BASE_WORLD.length() + 1);
+        return !tail.isEmpty() && tail.chars().allMatch(Character::isDigit);
+    }
+
+    /** Deletes every {@code passthrough*} save. Only called with no world loaded. */
+    public static int deleteOldWorlds(Minecraft client) {
+        final Path saves = client.getLevelSource().getLevelPath(BASE_WORLD).getParent();
+        if (saves == null || !Files.isDirectory(saves)) {
+            return 0;
+        }
+        int removed = 0;
+        try (Stream<Path> entries = Files.list(saves)) {
+            for (Path path : entries.toList()) {
+                if (Files.isDirectory(path) && isOwnWorld(path.getFileName().toString())) {
+                    deleteRecursively(path);
+                    ++removed;
+                }
+            }
+        } catch (IOException exception) {
+            LOGGER.warn("could not list the saves in {}: {}", saves, exception.toString());
+        }
+        return removed;
+    }
+
+    /** Deletes one save directory. Refuses the id of the world being played right now. */
+    public static boolean deleteWorld(Minecraft client, String id) {
+        if (id == null || id.isBlank() || !isOwnWorld(id)) {
+            return false;
+        }
+        if (id.equals(currentWorldId)) {
+            LOGGER.warn("refusing to delete the save that is being played (\"{}\")", id);
+            return false;
+        }
+        final Path path = client.getLevelSource().getLevelPath(id);
+        if (!Files.isDirectory(path)) {
+            return false;
+        }
+        try {
+            deleteRecursively(path);
+            LOGGER.info("deleted the previous void save \"{}\"", id);
+            return true;
+        } catch (IOException exception) {
+            LOGGER.warn("could not delete the void save \"{}\": {}", id, exception.toString());
+            return false;
+        }
+    }
+
+    private static void deleteRecursively(Path path) throws IOException {
+        try (Stream<Path> files = Files.walk(path)) {
+            for (Path each : files.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(each);
+            }
+        }
     }
 
     /**
@@ -169,18 +299,23 @@ public final class McWorldBootstrap {
         if (inWorldHandled || client.player == null) {
             return;
         }
+        if (passthroughWorld && client.getSingleplayerServer() == null) {
+            // The integrated server is one tick behind the client level; dressing the world
+            // without it would leave the ball standing in the void on newly created worlds.
+            return;
+        }
         inWorldHandled = true;
         // The selected hotbar slot is player data and survives a restart, so whoever scrolled
         // to an empty slot last session comes back with an empty hand -- and the first right
         // click then does nothing at all, which reads as "placing is broken". Reset it on both
         // sides: dressScene resets the server copy, and that one is never pushed to the client.
         client.player.getInventory().setSelectedSlot(0);
-        LOGGER.info("in world: dimension={} pos=({}, {}, {}) gameType={} passthrough={}",
+        LOGGER.info("in world: dimension={} pos=({}, {}, {}) gameType={} passthrough={} save={}",
                 client.level.dimension().identifier(),
                 String.format("%.1f", client.player.getX()),
                 String.format("%.1f", client.player.getY()),
                 String.format("%.1f", client.player.getZ()),
-                client.player.gameMode(), passthroughWorld);
+                client.player.gameMode(), passthroughWorld, currentWorldId);
         if (!passthroughWorld) {
             return;
         }

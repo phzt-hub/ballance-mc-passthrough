@@ -81,6 +81,8 @@ public final class McFrameExport {
 
     private static boolean initialised;
     private static boolean enabled;
+    /** Held while the client has no world: its loading screen must not reach the Ballance view. */
+    private static volatile boolean suspended;
     private static long minIntervalNanos;
     private static String mailboxPath;
 
@@ -252,6 +254,9 @@ public final class McFrameExport {
         if (!enabled || minecraft == null) {
             return;
         }
+        if (suspended) {
+            return;
+        }
         long now = System.nanoTime();
         if (minIntervalNanos > 0 && now - lastRequestNanos < minIntervalNanos) {
             ++skipped;
@@ -314,6 +319,40 @@ public final class McFrameExport {
                 }, 0);
     }
 
+    /** Stops (or resumes) publishing frames; see {@link #publishBlank()}. */
+    public static void setSuspended(boolean value) {
+        suspended = value;
+    }
+
+    /**
+     * Publishes one fully transparent frame and leaves it as the consumer's last frame.
+     *
+     * <p>Used when the world is being replaced: the consumer redraws the last frame it uploaded
+     * every tick, so a transparent one means "draw nothing of mine for a while" and the Ballance
+     * view underneath -- the level that was just entered -- is what the player sees.
+     */
+    public static void publishBlank() {
+        if (!initialised) {
+            initialise();
+        }
+        if (!enabled || map == null || mapInts == null || width <= 0 || height <= 0) {
+            return;
+        }
+        final int slot = nextSlot;
+        nextSlot = (nextSlot + 1) % SLOTS;
+        final int target = (HEADER_BYTES + slot * width * 4 * height) / 4;
+        final int count = width * height;
+        for (int i = 0; i < count; i++) {
+            mapInts.put(target + i, 0);
+        }
+        VarHandle.storeStoreFence();
+        map.putInt(OFF_PUBLISHED_SLOT, slot);
+        VarHandle.storeStoreFence();
+        map.putInt(OFF_FRAME_ID, ++frameId);
+        ++published;
+        LOGGER.info("published a blank frame (the world is being replaced)");
+    }
+
     /**
      * 把读回的一帧写进信箱。{@code data} 是纹理原样的行优先字节（每像素
      * {@code blockSize} 字节、R,G,B,A 顺序、**第一行是画面最下面一行**——GL 的约定），
@@ -321,6 +360,12 @@ public final class McFrameExport {
      */
     private static void publishRows(ByteBuffer data, int frameWidth, int frameHeight, int blockSize) {
         trace("publish enter" + where());
+        if (suspended) {
+            // A capture that was in flight when the world was dropped would otherwise land
+            // after the blank frame and put the old world back on screen for the whole reload.
+            trace("publish dropped (suspended)");
+            return;
+        }
         try {
             trace("publish image " + frameWidth + "x" + frameHeight);
             if (frameWidth < 8 || frameHeight < 8) {

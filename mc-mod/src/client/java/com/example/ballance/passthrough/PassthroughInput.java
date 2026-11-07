@@ -263,10 +263,13 @@ public final class PassthroughInput {
      * on its next pass, exactly as it would for a real press.
      */
     private static void forwardWorldInput(Minecraft client, McCameraChannel.Pose pose) {
-        if (client.player == null || client.level == null || !pose.hasBall()) {
+        if (client.player == null || client.level == null || !pose.inLevel() || !pose.hasBall()) {
             // Nothing to act on while Ballance is still in its menus: the camera channel is
             // publishing from the first frame, but a click on START is not a click in the
-            // world. hasBall() is what says a level is running.
+            // world. FLAG_LEVEL is what says a level is running -- hasBall() cannot, because
+            // the menu composition has ball-shaped objects of its own (2026-11-07: the menu
+            // reported one at the origin, so every menu click was reaching the world and
+            // marking the world as built in).
             seenButtons = pose.buttons();
             seenWheel = pose.wheel();
             return;
@@ -279,6 +282,9 @@ public final class PassthroughInput {
             seenButtons = down ? (seenButtons | McCameraChannel.BUTTON_LEFT)
                     : (seenButtons & ~McCameraChannel.BUTTON_LEFT);
             mouseKey(1, down);
+            if (down) {
+                LevelSession.noteWorldTouched();
+            }
             LOGGER.info("world left {} aim={} held={}", down ? "press" : "release",
                     describe(aimResult(client)), client.player.getMainHandItem());
         }
@@ -287,6 +293,9 @@ public final class PassthroughInput {
             seenButtons = down ? (seenButtons | McCameraChannel.BUTTON_RIGHT)
                     : (seenButtons & ~McCameraChannel.BUTTON_RIGHT);
             if (down) {
+                // A world that has been clicked in is a world with blocks in it: the next
+                // level entered from the menu gets a fresh one (LevelSession).
+                LevelSession.noteWorldTouched();
                 // A void world has nothing to place against: vanilla finds no block under the
                 // aim and falls through to useItem, where a plain BlockItem does nothing. So the
                 // block is spawned at the end of the reach instead. Once one exists the ray hits

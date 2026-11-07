@@ -56,6 +56,10 @@
 #define MPC_FLAG_VALID 0x1u      // Eye/Forward/Up/FovY are meaningful
 #define MPC_FLAG_BALL 0x2u       // Ball is meaningful
 #define MPC_FLAG_PAUSED 0x4u     // the level is not advancing
+#define MPC_FLAG_LEVEL 0x8u      // a level is running: the attached camera is a gameplay one
+                                 // (the menu keeps Cam_MenuLevel attached, and it also has
+                                 // ball-shaped objects parked at the origin, so "a ball
+                                 // exists" is not "a level is running")
 
 // Pointer buttons, as published in InputButtons.
 #define MPC_BUTTON_LEFT 0x1u

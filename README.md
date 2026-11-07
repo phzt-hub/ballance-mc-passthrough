@@ -47,7 +47,7 @@ J:\bmc-project\run-ballance.bat    :: 2) 带 BALLANCE_MC_PASSTHROUGH=1 起 Balla
 |---|---|
 | `runtime\Bin\mc-passthrough.log`（每 2 秒一行） | `mapped … (4923136 bytes)` → `baseline frame N (published before this run, not drawn)` → `frames=… draws=… (15 fps consumed)` |
 | `runtime\mc\logs\latest.log` | `published 75 frames in 5s (~15 fps), skipped 75, failures 0, transparent 87.6%` |
-| Ballance 窗口 | 准星在正中、九格快捷栏贴底、右下角一只手臂 —— **这三样都是 MC 自己画的**，不是 Ballance 补的 |
+| Ballance 窗口 | 准星在球上方（AimLift 抬起来的那一点）、九格快捷栏贴底、右下角一只手臂 —— **这三样都是 MC 自己画的**，不是 Ballance 补的 |
 
 `waiting for … error 2` 反复出现 = 源头没起来，不是穿透坏了。
 
@@ -61,6 +61,8 @@ J:\bmc-project\run-ballance.bat    :: 2) 带 BALLANCE_MC_PASSTHROUGH=1 起 Balla
 | 第三人称只画球、第一人称只画手臂 | ✅ | [docs/steve-in-ballance.md](docs/steve-in-ballance.md) |
 | 反向输入：E 开创造物品栏、滚轮换格、点物品 | ✅ M1b | [docs/m1b-input.md](docs/m1b-input.md) |
 | 摆方块 / 挖方块，射线打空时在准星前 4.5 格生成 | ✅ M1c | [docs/m1c-place.md](docs/m1c-place.md) |
+| 准星跟着球漂，钉在「这一下会放方块的地方」 | ✅ 11-07 | [docs/m1b-input.md](docs/m1b-input.md) 第五节 |
+| 每个关卡一个全新的世界（从菜单进关就删档重建） | ✅ 11-07 | [docs/level-worlds.md](docs/level-worlds.md) |
 | F1 设置面板，9 行开关就地生效 | ✅ | [docs/settings-panel.md](docs/settings-panel.md) |
 
 尺度：**1 方块 = 4.0 Ballance 单位 = 一个球径**（球 `Ball_Wood` 是 4.00×4.00×4.00），

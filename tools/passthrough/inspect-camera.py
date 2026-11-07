@@ -22,7 +22,7 @@ import time
 
 MPC_MAGIC = 0x3143504D
 MPC_BYTES = 4096
-FLAG_VALID, FLAG_BALL, FLAG_PAUSED = 0x1, 0x2, 0x4
+FLAG_VALID, FLAG_BALL, FLAG_PAUSED, FLAG_LEVEL = 0x1, 0x2, 0x4, 0x8
 
 LAYOUT = "<IIIIII" + "3f" * 3 + "4f" + "3f" + "f" + "I" + "Q"
 # magic, version, seq, flags, width, height, eye, forward, up, fovy, aspect, near,
@@ -62,10 +62,11 @@ def describe(v) -> str:
         "magic     0x%08X %s" % (magic, "ok" if magic == MPC_MAGIC else "MISMATCH"),
         "version   %d" % version,
         "seq       %d   frame %d" % (seq, frame),
-        "flags     0x%X%s%s%s" % (
+        "flags     0x%X%s%s%s%s" % (
             flags,
             " VALID" if flags & FLAG_VALID else "",
             " BALL" if flags & FLAG_BALL else "",
+            " LEVEL" if flags & FLAG_LEVEL else "",
             " PAUSED" if flags & FLAG_PAUSED else ""),
         "size      %dx%d  aspect %.4f" % (width, height, aspect),
         "eye       (%.3f, %.3f, %.3f)  u" % (ex, ey, ez),

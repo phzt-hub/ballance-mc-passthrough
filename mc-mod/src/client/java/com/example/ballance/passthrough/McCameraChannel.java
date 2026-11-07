@@ -81,6 +81,12 @@ public final class McCameraChannel {
 
     public static final int FLAG_VALID = 0x1;
     public static final int FLAG_BALL = 0x2;
+    /**
+     * A level is running (2026-11-07). The menu also has ball-shaped objects parked at the
+     * origin, so {@link #FLAG_BALL} alone cannot tell "in a level" from "in a menu"; this flag
+     * is set from the attached camera instead (see MpCamera.h).
+     */
+    public static final int FLAG_LEVEL = 0x8;
 
     public static final int BUTTON_LEFT = 0x1;
     public static final int BUTTON_RIGHT = 0x2;
@@ -107,6 +113,11 @@ public final class McCameraChannel {
 
         public boolean hasBall() {
             return (flags & FLAG_BALL) != 0;
+        }
+
+        /** True while a level is running; false in the menus. */
+        public boolean inLevel() {
+            return (flags & FLAG_LEVEL) != 0;
         }
     }
 

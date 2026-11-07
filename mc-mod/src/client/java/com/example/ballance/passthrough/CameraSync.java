@@ -156,32 +156,41 @@ public final class CameraSync {
         }
     }
 
+    /** No offset: the crosshair stays exactly where Minecraft draws it. */
+    private static final float[] NO_OFFSET = {0.0f, 0.0f};
+
     /**
-     * Where the crosshair has to be drawn, in GUI pixels above the centre, so that it sits on the
-     * block the current aim would place.
+     * Where the crosshair has to be drawn, in GUI pixels from the centre of the GUI, so that it
+     * sits on the block the current aim would place.
      *
-     * <p>This is what the panel's AimLift ends up as. The lift rotates the player's aim -- the
+     * <p>This is what the panel's AimLift ends up as: the lift rotates the player's aim -- the
      * rotation Minecraft starts the placement ray from -- and a block placed at the end of the
-     * reach is seen by the camera at some angle above its own axis. Drawing the crosshair there
-     * is what makes "aim here, the block appears there" true. Tilting the camera instead moves
-     * nothing relative to the ball: the ball is drawn by Ballance at the centre of its frame, and
-     * the crosshair is the centre of this one.
+     * reach is seen by the camera at an angle above its own axis. Drawing the crosshair on that
+     * point is what makes "aim here, the block appears there" true.
      *
-     * <p>Returns 0 when there is no pose yet, so the stock crosshair is left alone.
+     * <p>It used to be a vertical offset from the centre, computed from the angle between the aim
+     * and the camera axis. That is only correct while the ball is exactly at the centre of the
+     * frame, and it never followed the ball sideways at all. Ballance's camera lags the ball:
+     * measured on a 640x480 frame at level 1, the ball's projected position drifts up to 32 px
+     * horizontally and 34 px vertically while rolling, and a crosshair pinned to the centre stayed
+     * behind every time. Projecting the aim point through the same camera instead gives both
+     * axes: the point is anchored to the ball (the player stands on it), so the crosshair drifts
+     * with the ball, and it is still exactly where the block will appear.
+     *
+     * <p>Returns {0, 0} when there is no pose yet, so the stock crosshair is left alone.
      */
-    public static float crosshairOffsetPixels(int guiHeight) {
+    public static float[] crosshairOffsetGui(int guiWidth, int guiHeight) {
         final McCameraChannel.Pose pose = framePose;
-        if (pose == null || !pose.valid() || guiHeight <= 0 || pose.fovY() <= 0.0f) {
-            return 0.0f;
+        if (pose == null || !pose.valid() || guiWidth <= 0 || guiHeight <= 0 || pose.fovY() <= 0.0f) {
+            return NO_OFFSET;
         }
         if (!McCameraMapper.ready()) {
-            return 0.0f;
+            return NO_OFFSET;
         }
         final Minecraft client = Minecraft.getInstance();
         if (client.player == null) {
-            return 0.0f;
+            return NO_OFFSET;
         }
-        final double[] eye = McCameraMapper.toBlocks(pose.eye());
         final float[] yawPitch = aim(McCameraMapper.yawPitch(pose.forward()), pose.aimLift());
         final double yaw = Math.toRadians(yawPitch[0]);
         final double pitch = Math.toRadians(yawPitch[1]);
@@ -199,23 +208,32 @@ public final class CameraSync {
         final double blockY = eyeY + aimY * REACH_BLOCKS;
         final double blockZ = eyeZ + aimZ * REACH_BLOCKS;
 
-        // ... and the camera sees that point at an angle off its own axis.
+        // ... and the camera sees that point at an angle off its own axis, in both axes.
+        final double[] eye = McCameraMapper.toBlocks(pose.eye());
         final double[] forward = {pose.forward()[0], pose.forward()[1], -pose.forward()[2]};
         final double[] up = {pose.up()[0], pose.up()[1], -pose.up()[2]};
+        final double rightX = forward[1] * up[2] - forward[2] * up[1];
+        final double rightY = forward[2] * up[0] - forward[0] * up[2];
+        final double rightZ = forward[0] * up[1] - forward[1] * up[0];
         final double vx = blockX - eye[0];
         final double vy = blockY - eye[1];
         final double vz = blockZ - eye[2];
         final double along = vx * forward[0] + vy * forward[1] + vz * forward[2];
-        final double above = vx * up[0] + vy * up[1] + vz * up[2];
         if (along <= 1.0e-6) {
-            return 0.0f;
+            return NO_OFFSET;
         }
-        final double angle = Math.atan2(above, along);
-        // guiHeight is the vertical extent, so this has to be the vertical half-FOV: the
-        // channel's number is horizontal, and using it here under-corrected the crosshair by
-        // exactly the aspect ratio.
-        final double halfFov = verticalFov(pose) * 0.5;
-        return (float) (guiHeight * 0.5 * Math.tan(angle) / Math.tan(halfFov));
+        final double side = vx * rightX + vy * rightY + vz * rightZ;
+        final double above = vx * up[0] + vy * up[1] + vz * up[2];
+
+        // Both half-angles, each one in the axis it belongs to: the channel's number spans the
+        // width (see verticalFov), while Minecraft's projection spans the height and lets the
+        // aspect produce the horizontal one.
+        final double tanHorizontal = Math.tan(pose.fovY() * 0.5);
+        final double tanVertical = Math.tan(verticalFov(pose) * 0.5);
+        final double ndcX = (side / along) / tanHorizontal;
+        final double ndcY = (above / along) / tanVertical;
+        // Screen x grows to the right and GUI y grows downwards, the opposite of NDC's y.
+        return new float[]{(float) (ndcX * guiWidth * 0.5), (float) (-ndcY * guiHeight * 0.5)};
     }
 
     /**
