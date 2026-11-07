@@ -112,13 +112,23 @@ world_click() {
 echo "== E"
 key e 2.5
 grab 00-inventory
-echo "== click slot (307 192) then hotbar 0 (199 344)"
-click_at 307 192
+# Slots are in window pixels, and the creative screen draws at GUI scale 2 in a 640x480
+# window: the item grid starts at (150,130) with 36 px cells, the hotbar row at y 382..420.
+# The carried stack goes into hotbar slot 0 with the "1" key -- vanilla swaps a carried
+# stack into that slot in any container screen. Clicking the screen's hotbar row is not
+# reliable here: at GUI scale 2 its cells do not line up with the HUD hotbar's, and a click
+# a few pixels off either misses the slot or lands on a tab.
+echo "== click slot (167 150), then key 1 to put it in hotbar slot 0"
+click_at 167 150
 grab 01-picked
-click_at 199 344
+key 1 1.5
 grab 02-hotbar
 echo "== E to close"
 key e 2.0
+# The creative screen puts the picked stack in hotbar slot 1 (a click on the screen's own
+# hotbar row lands a cell off), and the mod selects slot 0 at world entry, so roll one notch
+# down to hold it. Verified by the "held=" field of the next world click.
+xdotool click 5; sleep 1.2
 grab 03-world
 
 # 2) The world click. Nothing is under the aim in a void world, so this is the branch

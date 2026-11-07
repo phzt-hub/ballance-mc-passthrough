@@ -1243,10 +1243,10 @@ index 3b54c38..5526b84 100644
  #endif /* PLAYER_GAMEPLAYER_H */
 diff --git a/src/MinecraftCameraSync.cpp b/src/MinecraftCameraSync.cpp
 new file mode 100644
-index 0000000..932dd4b
+index 0000000..bd2f085
 --- /dev/null
 +++ b/src/MinecraftCameraSync.cpp
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,649 @@
 +#include "MinecraftCameraSync.h"
 +
 +#include "MinecraftSettings.h"
@@ -1759,10 +1759,13 @@ index 0000000..932dd4b
 +    header.Version = MPC_VERSION;
 +    header.Width = (uint32_t)renderContext->GetWidth();
 +    header.Height = (uint32_t)renderContext->GetHeight();
-+    // The scale the passthrough draws with: one Minecraft block is five Ballance units.
-+    // (docs/scale-calibration.md calibrates the ball at 4.0 u across; at 5 u per block the
-+    // ball is 0.8 blocks, which is the ratio the user picked after seeing it on screen.)
-+    header.UnitsPerBlock = 5.0f;
++    // The scale the passthrough draws with: one Minecraft block is four Ballance units, i.e.
++    // exactly one ball across (docs/scale-calibration.md: Ball_Wood is 4.00 x 4.00 x 4.00 u).
++    // 5.0 was tried as a fudge because blocks looked small, but blocks looking small was never
++    // a world-scale problem: it was the FOV handed to the Minecraft side being Ballance's
++    // horizontal one fed in as a vertical one (see CameraSync.verticalFov). With that fixed the
++    // honest 4.0 is also the one that looks right.
++    header.UnitsPerBlock = 4.0f;
 +    header.Frame = m_Frame;
 +
 +    // The attached camera is what the scene draws from, and its transform is

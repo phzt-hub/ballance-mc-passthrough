@@ -39,6 +39,7 @@ public final class CameraSync {
 
     private static volatile McCameraChannel.Pose framePose;
     private static boolean announced;
+    private static boolean aspectWarned;
     private static int applied;
     private static long lastLogNanos;
 
@@ -71,19 +72,88 @@ public final class CameraSync {
             return;
         }
         lastLogNanos = now;
+        checkFrameAspect(pose);
         McCameraMapper.ensure(pose);
         final double[] eye = McCameraMapper.toBlocks(pose.eye());
         final double[] ball = pose.hasBall() ? McCameraMapper.toBlocks(pose.ball()) : null;
         final float[] yawPitch = aim(McCameraMapper.yawPitch(pose.forward()), pose.aimLift());
         LOGGER.info(String.format(
-                "applied pose: eye=(%.2f, %.2f, %.2f) yaw=%.2f pitch=%.2f (lift %.2f) fov=%.2f aspect=%.3f ball=%s",
+                "applied pose: eye=(%.2f, %.2f, %.2f) yaw=%.2f pitch=%.2f (lift %.2f)"
+                        + " fovH=%.2f -> fovV=%.2f aspect=%.3f frame=%dx%d ball=%s",
                 eye[0], eye[1], eye[2], yawPitch[0], yawPitch[1], Math.toDegrees(pose.aimLift()),
-                Math.toDegrees(pose.fovY()), pose.aspect(),
+                Math.toDegrees(pose.fovY()), Math.toDegrees(verticalFov(pose)), pose.aspect(),
+                frameWidth(), frameHeight(),
                 ball == null ? "(none)" : String.format("(%.2f, %.2f, %.2f)", ball[0], ball[1], ball[2])));
     }
 
     public static McCameraChannel.Pose framePose() {
         return framePose;
+    }
+
+    /**
+     * Ballance's field of view as the vertical one Minecraft's projection wants.
+     *
+     * <p>The channel carries the FOV the Ballance camera is set to, and Virtools takes that
+     * number as the <b>horizontal</b> one: {@code VxMatrix::Perspective} puts {@code cot(fov/2)}
+     * in {@code m00} (x) and {@code cot(fov/2) * aspect} in {@code m11} (y), so the value spans
+     * the width. Minecraft's {@code Camera.calculateFov} is the opposite -- it is vertical, and
+     * the projection multiplies by the framebuffer aspect on its own.
+     *
+     * <p>Feeding 58 straight in therefore opened the Minecraft side up by 58 vertical instead of
+     * 58 horizontal, which is {@code aspect} times too wide, and drew the Minecraft world at
+     * 1/aspect of its true size: measured on a 640x480 frame, a one-block cube next to the ball
+     * came out at 0.56 of the ball's width (vertically 0.75). That is the "two blocks to one
+     * ball" the scale report described.
+     */
+    public static double verticalFov(McCameraChannel.Pose pose) {
+        final double aspect = pose.aspect() > 0.01f ? pose.aspect() : 4.0 / 3.0;
+        return 2.0 * Math.atan(Math.tan(pose.fovY() * 0.5) / aspect);
+    }
+
+    /**
+     * The size of the frame this client exports, i.e. what the composite will be stretched to.
+     *
+     * <p>Only for the log line and the aspect check: the projection itself has to follow the
+     * framebuffer aspect for the two halves of the composite to agree, and there is no way to
+     * make a 16:9 frame and a 4:3 window agree in both axes at once (see {@link #checkFrameAspect}).
+     */
+    public static int frameWidth() {
+        final Minecraft client = Minecraft.getInstance();
+        return client.getWindow() == null ? 0 : client.getWindow().getWidth();
+    }
+
+    public static int frameHeight() {
+        final Minecraft client = Minecraft.getInstance();
+        return client.getWindow() == null ? 0 : client.getWindow().getHeight();
+    }
+
+    /**
+     * Warns once when the exported frame's aspect differs from the Ballance window's.
+     *
+     * <p>The composite stretches the frame over the whole window. Two square-pixel projections
+     * can only agree about angles in both axes when their aspect ratios match; with 854x480 over
+     * 640x480 the horizontal gets the extra squeeze and cubes come out narrow. Setting the
+     * window to the same shape is the fix (options.txt overrideWidth/overrideHeight); this is
+     * the tripwire that says so instead of leaving it to the eye.
+     */
+    private static void checkFrameAspect(McCameraChannel.Pose pose) {
+        if (aspectWarned) {
+            return;
+        }
+        final int width = frameWidth();
+        final int height = frameHeight();
+        if (width <= 0 || height <= 0 || pose.aspect() <= 0.01f) {
+            return;
+        }
+        final double frame = (double) width / height;
+        if (Math.abs(frame - pose.aspect()) > 0.02) {
+            aspectWarned = true;
+            LOGGER.warn(String.format(
+                    "frame aspect %.3f (%dx%d) differs from the Ballance window's %.3f: the"
+                            + " composite stretches one into the other, so the two views cannot"
+                            + " match in both axes. Resize the window to %d x %d.",
+                    frame, width, height, pose.aspect(), width, (int) Math.round(width / pose.aspect())));
+        }
     }
 
     /**
@@ -141,7 +211,10 @@ public final class CameraSync {
             return 0.0f;
         }
         final double angle = Math.atan2(above, along);
-        final double halfFov = pose.fovY() * 0.5;
+        // guiHeight is the vertical extent, so this has to be the vertical half-FOV: the
+        // channel's number is horizontal, and using it here under-corrected the crosshair by
+        // exactly the aspect ratio.
+        final double halfFov = verticalFov(pose) * 0.5;
         return (float) (guiHeight * 0.5 * Math.tan(angle) / Math.tan(halfFov));
     }
 

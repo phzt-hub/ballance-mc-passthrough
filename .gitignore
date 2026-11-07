@@ -8,6 +8,7 @@
 !/docs/steve-shots/*.png
 !/docs/view-shots/*.png
 !/docs/hud-shots/*.png
+!/docs/m1c-shots/*.png
 
 # 运行目录（生成的游戏树 + 截图/日志，可随时重建）
 /run/

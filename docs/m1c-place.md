@@ -107,24 +107,73 @@ if (down) KeyMapping.click(mouseKey(button));
 CREDITS / START / LEVEL 8 那些点击，每一发都会变成 MC 的一次左键攻击
 （虚空里无害，但状态脏）。门禁是 `pose.hasBall()`：**有球才说明在关卡里**。
 
-### 4. 比例：1 方块 = 5 u
+### 4. 比例：1 方块 = 4 u，屏幕上也正好一个球宽
 
-`docs/scale-calibration.md` 标定球直径 4.0 u。原来按 `UnitsPerBlock = 4.0`，
-球正好一格；实机看下来方块偏小，改成 **5.0** —— 球 0.8 格，方块比球大约 25%。
-这个数同时决定相机、球位、放置距离在 MC 坐标里的换算，改一处两边都得跟着：
+`docs/scale-calibration.md` 标定球直径 **4.00 u**（`Ball_Wood` 网格 4.00×4.00×4.00），
+所以「一个方块等价于一个球宽」就是 **`UnitsPerBlock = 4.0`**。这一版就是 4.0，
+而且屏幕上也终于是这个数——中间那一版 5.0 是补错了地方。
+
+**方块偏小从来不是世界比例的问题。** 4.0 和 5.0 改的是世界换算，可是被摆下的方块
+离相机几格是**固定的**（射线长度 4.5 格），它在屏上的宽度根本不随 `UnitsPerBlock` 变；
+真正错的是两半的**投影**：
+
+| | Ballance 那半 | Minecraft 那半（改前） |
+|---|---|---|
+| FOV 口径 | 58° **水平**（`VxMatrix::Perspective` 的 `m00 = cot(fov/2)` 是 x 方向） | 58 被当成**垂直**用（`Camera.calculateFov` 是垂直的） |
+| 帧尺寸 | 640×480 | 854×480 |
+| 焦距 | 577 px（两个轴） | 433 px（原始帧），合成时横向再乘 640/854 |
+| 合成后等效焦距 | 577 / 577 | **325 / 433** |
+| 相对 Ballance | 1.00 | **0.56 横 / 0.75 竖** |
+
+所以一个方块在屏幕上只有球的 0.56 宽、0.75 高，又被横向压扁——这就是「两个方块才
+顶一个球」的来源。改法是两头一起对齐：
+
+1. `CameraMixin` 把通道里的**水平** FOV 换成垂直的再交给 MC：
+   `2·atan(tan(fovH/2) / aspect)`，58° → **45.15°**（`CameraSync.verticalFov`）；
+   准星的像素偏移同一处口径，也跟着改了。
+2. MC 的帧尺寸必须和 Ballance 窗口**同宽高比**：两个都是方形像素的投影，
+   宽高比不同就没有任何单一 FOV 能让两个轴同时对上，合成时只能把一边压扁。
+   现在 `run/options.txt` 里 `overrideWidth:640 / overrideHeight:480`，
+   帧就是 640×480，合成 1:1 不再缩放。`CameraSync` 发现两者差超过 2% 会在日志里
+   报警（`frame aspect ... differs from the Ballance window's`），不再靠眼睛发现。
+
+改完的实测（`tools/passthrough/fit-projection.py`：拿**已知坐标**的方块，
+用 Ballance 的投影公式算出它该占的框，再和目标帧里量到的框比）：
 
 ```
-/usr/share/.../MinecraftCameraSync.cpp: header.UnitsPerBlock = 5.0f;
-mc-mod/.../McCameraMapper.java:      unitsPerBlock = 5.0f (fallback)
+frame          640x480
+Ballance f     577.3 px  (horizontal fov 58.00 deg)
+block          [3, 98, 0]            <- 虚空里右键 MISS，日志给了确切坐标
+predicted box  x 318.9..364.1  y 116.6..177.9   (45.2 x 61.3 px)
+measured box   x 315..362  y 116..179   (47 x 63 px)
+implied fx     600.4 px   fy 593.1 px   (Ballance: 577.3)
 ```
+
+两个轴都落回 577 px 附近（量的框每边多 1 px 抗锯齿，正好解释 47 对 45.2）。
+球那半也对得上：4.00 u 的球离相机 41.35 u，577 × 4 / 41.35 = **55.8 px**，
+合成帧里量到 **56–58 px**。
+
+镜头、球位、放置距离的换算都跟着这一个数走，改一处两边都得跟着：
+
+```
+Source/Player/src/MinecraftCameraSync.cpp: header.UnitsPerBlock = 4.0f;
+mc-mod/.../McCameraMapper.java:            unitsPerBlock = 4.0f (fallback)
+```
+
+`McCameraMapper` 以前**第一帧就把比例锁死**（`if (ready) return;`），C++ 后来改的值
+一个都没生效——22:20 那轮整轮跑的都是旧比例，这也是当时「改成 5.0 却看不出变化」的
+原因。现在只锁原点（那是两套世界的对应关系，不能变），比例每帧跟着通道走。
 
 `inspect-camera.py` 能独立读出这个值，不用信两端的日志：
 
 ```
-ball      (35.907, 34.425, 0.046)  u
-ball->eye (-22.043, 35.002, 0.073)  u = 8.27 blocks
-units/blk 5.000
+ball      (35.911, 34.425, 0.038)  u
+ball->eye (-22.048, 35.003, 0.083)  u = 10.34 blocks
+units/blk 4.000
 ```
+
+> 剩下的误差：准星方块中心还差约 20 px（改前差得更多，因为偏移量也用了水平口径）。
+> 那是 `aimLift` 那条路的单独问题，不影响这里量的投影。
 
 ### 5. 指针位置只在屏幕里用
 

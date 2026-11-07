@@ -63,6 +63,9 @@ public abstract class CameraMixin {
         if (pose == null || !pose.valid()) {
             return;
         }
-        callback.setReturnValue((float) Math.toDegrees(pose.fovY()));
+        // Vertical, not the channel's horizontal number: Minecraft's FOV spans the height and
+        // the projection applies the aspect itself. See CameraSync.verticalFov for the
+        // measurement that pinned this down.
+        callback.setReturnValue((float) Math.toDegrees(CameraSync.verticalFov(pose)));
     }
 }

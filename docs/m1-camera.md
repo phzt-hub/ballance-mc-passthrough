@@ -84,6 +84,11 @@ Ballance 侧与 Java 读端是实测过的（见下）。
 - 原点：两套世界没有公共坐标，第一次采样时把**球心**定到锚点
   BALLANCE_MC_ANCHOR（默认 0,100,0），之后一切按相对位置走。不做这一步，第 1 关的
   z = -153 会把世界甩到几百格之外。
+- 焦距：通道里的 `FovY` 是 Ballance 的 **水平** FOV（`VxMatrix::Perspective` 把
+  `cot(fov/2)` 放在 m00，即 x 方向），而 `Camera.calculateFov` 是**垂直**的。
+  客户端必须换算：`2·atan(tan(fovH/2)/aspect)`（58° → 45.15°），并且 MC 的帧要和
+  Ballance 窗口同宽高比，否则两个轴不可能同时对上。口径、实测数字和踩过的坑写在
+  [docs/m1c-place.md](m1c-place.md) 的第 4 节。
 
 ## 四、开关
 

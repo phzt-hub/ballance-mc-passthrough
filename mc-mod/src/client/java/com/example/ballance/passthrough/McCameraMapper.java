@@ -25,7 +25,7 @@ public final class McCameraMapper {
     private static double anchorX;
     private static double anchorY = 100.0;
     private static double anchorZ;
-    private static float unitsPerBlock = 5.0f;
+    private static float unitsPerBlock = 4.0f;
 
     static {
         final String spec = System.getenv("BALLANCE_MC_ANCHOR");
@@ -46,13 +46,25 @@ public final class McCameraMapper {
     private McCameraMapper() {
     }
 
-    /** Locks the mapping in on the first usable sample. */
+    /**
+     * Locks the origin in on the first usable sample, and keeps the scale current.
+     *
+     * <p>The origin has to be locked: it is the correspondence between the two worlds, and
+     * re-deriving it would make the world jump. The scale is different -- it is a single number
+     * the Ballance side owns, and freezing it on the first frame silently ignored every later
+     * change (a whole acceptance run rendered at the old value because the client had been
+     * started before the rebuild). Cheap to keep current, so it is re-read every sample.
+     */
     public static synchronized void ensure(McCameraChannel.Pose pose) {
+        final float scale = pose.unitsPerBlock() > 0.0f ? pose.unitsPerBlock() : unitsPerBlock;
         if (ready) {
+            if (scale > 0.0f && Math.abs(scale - unitsPerBlock) > 1.0e-4f) {
+                unitsPerBlock = scale;
+            }
             return;
         }
         final double[] reference = pose.hasBall() ? pose.ball() : pose.eye();
-        unitsPerBlock = pose.unitsPerBlock() > 0.0f ? pose.unitsPerBlock() : 5.0f;
+        unitsPerBlock = scale > 0.0f ? scale : 4.0f;
         originX = reference[0];
         originY = reference[1];
         originZ = reference[2];
