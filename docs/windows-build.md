@@ -161,3 +161,30 @@ HUD 补丁一起移除）。同类函数在这台机器上已经踩过两次，�
 `run-game.tar.gz`（Linux 侧的 run/game 快照）和 `ballanced-src.tgz`（07:54 的旧源码快照）
 **都不能直接当 Windows 输入**：前者是 `.so`，后者不含 `MinecraftOverlay/Settings` 与字体图集。
 源码一律以本机 `~/src/Ballanced` 现取。
+
+## 分辨率（2026-11-07：640×480 → 1280×960）
+
+可玩目录两侧同时改成 4:3 的 1280×960：
+
+* `Bin\Player.ini`：`Width = 1280` / `Height = 960`，`[Window] X = 320 Y = 60`。
+  原来是 640×480 时的 X=504/Y=314，直接套到 1280×960 会把窗口推出屏幕下沿（1274 > 1080），
+  所以要一起改成居中值。`UnlockHighResolution` 不用动：它只过滤游戏内菜单里 **宽度大于 1600**
+  的模式，1280 本来就在列表里；启动时的模式匹配（`CGamePlayer::FindScreenMode`）根本不看这两个开关。
+* `mc\options.txt`：`overrideWidth:1280` / `overrideHeight:960`。
+
+**为什么两边必须同一个数**：合成是拿 MC 的整帧拉伸盖满 Ballance 的窗口，而且是点采样
+（`SubmitCopy` → `SubmitTexture(..., linear = FALSE)`）。尺寸相同就是逐像素 1:1；MC 比窗口小
+就是成倍放大（2 倍放大非常糊），比窗口大就是压扁兼走样。**比例不一致更糟**——两边的像素投影
+只有在比例相同时才在两个轴上同时对得上，成比例不同时 MC 会打一条
+`frame aspect ... differs from the Ballance window's ...`（`CameraSync.checkFrameAspect`）。
+854×480 塞进 640×480 的那段时间一直在走这条，正方体会被压窄。
+
+**这两个文件会不会被覆盖**：`cmake --install` 会用 `Player.ini.in` 重新生成 `Bin\Player.ini`
+（模板还是 640×480、`X/Y = 2147483647` 即居中），所以**重建并 install 之后要再改一遍**；
+`options.txt` 只有 MC 自己会写。
+
+**怎么验**：`Player.log` 里出现
+`No matching screen mode found for 1280 x 960 x 32` 就说明这块显示的官方模式表里没有它
+（`FindHighestRefreshMatch` 要求宽高**完全相等**），游戏会静默退回 640×480、不弹框、不崩
+（`OpenSetupDialog()` 是返回 false 的桩）。这台机器（RTX 5050 + 1920×1080）实测
+`EnumDisplaySettings` 列了 137 个模式，其中有 `1280x960 bpp=32 hz=60`，所以不会走到那条。
