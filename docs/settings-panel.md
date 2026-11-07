@@ -6,17 +6,18 @@ Steve 的几个开关以前只能靠环境变量，改一次就是一次重启�
 代码在 `Source/Player/src/`：`MinecraftSettings.*`（配置的唯一真相）、
 `MinecraftOverlay.*`（面板）、`MinecraftFontAtlas.h`（字形图集，生成物）。
 
-## 八行
+## 九行
 
 | ini 键 | 环境变量 | 面板标签 | 默认 | 步进 |
 |---|---|---|---|---|
-| `Steve` | `BALLANCE_MC_STEVE` | Steve in Ballance | 1 | 布尔 |
+| `Steve` | `BALLANCE_MC_STEVE` | Steve in Ballance | 0 | 布尔 |
 | `FollowBall` | `BALLANCE_MC_STEVE_BALL` | Follow the ball | 1 | 布尔 |
-| `FirstPerson` | `BALLANCE_MC_STEVE_FP` | First person | 0 | 布尔 |
+| `FirstPerson` | `BALLANCE_MC_STEVE_FP` | First person | 1 | 布尔 |
 | `HideSteve` | `BALLANCE_MC_STEVE_HIDE` | Hide Steve | 0 | 布尔 |
 | `HideBall` | `BALLANCE_MC_STEVE_HIDEBALL` | Hide the ball | 0 | 布尔 |
 | `Scale` | `BALLANCE_MC_STEVE_SCALE` | Model scale | 0.25 | ±0.05，限 0.05–2.0 |
 | `Sensitivity` | `BALLANCE_MC_STEVE_SENS` | Mouse sensitivity | 0.0025 | ±0.0005，限 0.0005–0.02 |
+| `AimLift` | `BALLANCE_MC_AIM_LIFT` | Aim lift (degrees) | 20 | ±1，限 0–30 |
 | `Debug` | `BALLANCE_MC_STEVE_DEBUG` | Debug log | 0 | 布尔 |
 
 `MinecraftSettings.cpp` 里是一张 `kRows[]`，ini 键 / 环境变量 / 标签 / 步进 /
