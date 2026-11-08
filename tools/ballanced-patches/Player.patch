@@ -38,7 +38,7 @@ index 347ca16..4bc5d2e 100644
  
  #define GAMECONFIG_PATH_FIELDS \
 diff --git a/src/GamePlayer.cpp b/src/GamePlayer.cpp
-index 4ffa776..b231aad 100644
+index 4ffa776..c949c49 100644
 --- a/src/GamePlayer.cpp
 +++ b/src/GamePlayer.cpp
 @@ -1,4 +1,4 @@
@@ -1102,7 +1102,7 @@ index 4ffa776..b231aad 100644
  void CGamePlayer::Run()
  {
      while (Update())
-@@ -469,8 +1510,66 @@ void CGamePlayer::Process()
+@@ -469,8 +1510,71 @@ void CGamePlayer::Process()
      m_CKContext->Process();
  }
  
@@ -1157,6 +1157,7 @@ index 4ffa776..b231aad 100644
 +        // Steve is placed through the normal scene graph, so it is drawn by
 +        // the game's own 3D pass and therefore depth tested against the track.
 +        m_Steve.SetPanelOpen(m_MinecraftPanel.IsOpen());
++        m_CameraSync.SetPanelOpen(m_MinecraftPanel.IsOpen());
 +        m_Steve.Frame(m_CKContext, m_RenderContext, elapsed);
 +        // M1: hand the viewpoint this frame will be drawn from to the Minecraft
 +        // client. It runs after Steve because in first person Steve moves the
@@ -1164,12 +1165,16 @@ index 4ffa776..b231aad 100644
 +        // frame's eyes, which is a visible lag between the ball and the world.
 +        // The panel still runs first, so the sync sees this frame's gate state.
 +        m_CameraSync.Frame(m_CKContext, m_RenderContext, elapsed);
-+        ApplyRelativeMouseMode(m_SdlWindow, m_Steve.WantsRelativeMouse());
++        // Two rigs want the pointer captured and either can be off: Steve's
++        // first-person look (parked since 2026-11-07) and the free view's
++        // orbit, which the F key turns on and off while the game runs.
++        ApplyRelativeMouseMode(m_SdlWindow, m_Steve.WantsRelativeMouse() ||
++                                                m_CameraSync.WantsRelativeMouse());
 +    }
      m_RenderContext->Render();
  }
  
-@@ -485,6 +1584,10 @@ void CGamePlayer::Shutdown()
+@@ -485,6 +1589,10 @@ void CGamePlayer::Shutdown()
          m_GameInfo = NULL;
      }
  
@@ -1180,7 +1185,7 @@ index 4ffa776..b231aad 100644
      ShutdownEngine();
      ShutdownWindow();
  
-@@ -498,6 +1601,8 @@ void CGamePlayer::Shutdown()
+@@ -498,6 +1606,8 @@ void CGamePlayer::Shutdown()
  void CGamePlayer::Play()
  {
      m_State = ePlaying;
@@ -1189,7 +1194,7 @@ index 4ffa776..b231aad 100644
      m_CKContext->Play();
      CLogger::Get().Debug("Game is playing.");
  }
-@@ -1542,6 +2647,7 @@ void CGamePlayer::OnActivateApp(bool active)
+@@ -1542,6 +2652,7 @@ void CGamePlayer::OnActivateApp(bool active)
                  m_InputManager->Pause(TRUE);
  
              ReleaseCursorClip();
@@ -1245,10 +1250,10 @@ index 3b54c38..5526b84 100644
  #endif /* PLAYER_GAMEPLAYER_H */
 diff --git a/src/MinecraftCameraSync.cpp b/src/MinecraftCameraSync.cpp
 new file mode 100644
-index 0000000..e1a8924
+index 0000000..b36f972
 --- /dev/null
 +++ b/src/MinecraftCameraSync.cpp
-@@ -0,0 +1,673 @@
+@@ -0,0 +1,940 @@
 +#include "MinecraftCameraSync.h"
 +
 +#include "MinecraftSettings.h"
@@ -1360,6 +1365,19 @@ index 0000000..e1a8924
 +}
 +
 +} // namespace
++
++// The orbit the free view is allowed: a ball is 4 units across, so closer than
++// that is inside it, and 60 units out is already outside anything a level draws
++// round the ball. 85 degrees is the community default (docs/free-camera.md).
++constexpr float kFreeViewMinDistance = 4.0f;
++constexpr float kFreeViewMaxDistance = 60.0f;
++constexpr float kFreeViewMaxPitch = 1.4835f;
++constexpr float kPiRadians = 3.14159265358979f;
++// Seconds without a ball the orbit survives. Long enough for the respawn after
++// a fall (sub-second in the levels measured), short enough that a level change
++// hands the view back instead of leaving the camera parked in a dead orbit.
++constexpr float kBallMissingGrace = 2.0f;
++
 +
 +void CMinecraftPauseGate::Set(CKContext *context, unsigned key, bool paused)
 +{
@@ -1757,6 +1775,255 @@ index 0000000..e1a8924
 +    }
 +}
 +
++
++// --- free view -------------------------------------------------------------
++//
++// F turns the camera loose: it orbits the ball, the mouse aims it, and the ball
++// keeps rolling on the level's own rules. The community FreeFirstPersonCamera
++// (docs/free-camera.md) answers the same question for the vanilla Player.exe;
++// its 360Mode = 0 default is the convention copied here -- world-Y yaw, pitch
++// clamped to +-85 degrees -- instead of inventing a second one.
++//
++// Third person, and nothing but the attached camera is touched, for one reason:
++// a viewpoint the level's scripts do not know about cannot open a menu, trigger
++// a camera zone, or hand the ball a new direction. What the player sees changes;
++// what the game does does not.
++
++bool CMinecraftCameraSync::GameCameraAlive(CKContext *context) const
++{
++    if (!context || !m_GameCamera || !m_GameCameraId) return false;
++    return context->GetObject(m_GameCameraId) == m_GameCamera;
++}
++
++bool CMinecraftCameraSync::EnsureFreeViewCamera(CKContext *context)
++{
++    if (m_FreeViewCamera && context->GetObject(m_FreeViewCameraId) == m_FreeViewCamera) return true;
++
++    CKCamera *camera = (CKCamera *)context->CreateObject(CKCID_CAMERA, "MpFreeViewCamera");
++    if (!camera) {
++        log_line("CreateObject(CKCID_CAMERA) failed; free view unavailable");
++        return false;
++    }
++    camera->ModifyObjectFlags(CK_OBJECT_NOTTOBELISTEDANDSAVED, 0);
++    // 70 degrees and the depth range the Steve camera settled on
++    // (MinecraftSteve.cpp explains why 0.5/20000 shimmers the road). Both are
++    // replaced by the level camera's own numbers on the first rendered frame.
++    camera->SetFov(1.2217f);
++    camera->SetFrontPlane(3.0f);
++    camera->SetBackPlane(8000.0f);
++    m_FreeViewCamera = camera;
++    m_FreeViewCameraId = camera->GetID();
++    log_line("free view camera created");
++    return true;
++}
++
++void CMinecraftCameraSync::EnterFreeView(CKContext *context, CKRenderContext *renderContext)
++{
++    if (!renderContext) return;
++    if (!EnsureFreeViewCamera(context)) return;
++
++    // Start from the pose the level's camera already has, so pressing F changes
++    // nothing on screen until the mouse moves. Any other start is a jump, and
++    // the first thing the player sees is a broken picture.
++    if (GameCameraAlive(context) && m_Ball) {
++        VxVector ball(0.0f, 0.0f, 0.0f);
++        VxVector eye(0.0f, 0.0f, 0.0f);
++        m_Ball->GetPosition(&ball);
++        m_GameCamera->GetPosition(&eye);
++        const VxVector delta = eye - ball; // ball -> camera
++        const float length = sqrtf(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
++        if (length > 1.0f) {
++            m_FreeDistance = length;
++            if (m_FreeDistance < kFreeViewMinDistance) m_FreeDistance = kFreeViewMinDistance;
++            if (m_FreeDistance > kFreeViewMaxDistance) m_FreeDistance = kFreeViewMaxDistance;
++            // The view direction points from the camera back at the ball.
++            const float inverse = 1.0f / length;
++            const VxVector forward(-delta.x * inverse, -delta.y * inverse, -delta.z * inverse);
++            m_FreeYaw = atan2f(forward.x, forward.z);
++            m_FreePitch = asinf(forward.y);
++            if (m_FreePitch > kFreeViewMaxPitch) m_FreePitch = kFreeViewMaxPitch;
++            if (m_FreePitch < -kFreeViewMaxPitch) m_FreePitch = -kFreeViewMaxPitch;
++        }
++    }
++
++    m_FreeViewOn = true;
++    log_line("free view on: orbit %.1f units, yaw %.0f deg, pitch %.0f deg (F gives the level camera back)",
++             m_FreeDistance, m_FreeYaw * kRadiansToDegrees, m_FreePitch * kRadiansToDegrees);
++}
++
++void CMinecraftCameraSync::LeaveFreeView(CKContext *context, CKRenderContext *renderContext)
++{
++    if (!m_FreeViewOn) return;
++    m_FreeViewOn = false;
++
++    // Hand the viewpoint back explicitly. Most levels re-attach their own camera
++    // every frame and would not need this, but the menu attaches once, and a
++    // frame drawn from a stale orbit after Escape is a picture of nothing.
++    const bool alive = GameCameraAlive(context);
++    if (renderContext && alive) {
++        CKCamera *camera = m_GameCamera;
++        renderContext->AttachViewpointToCamera(camera);
++        renderContext->SetViewTransformationMatrix(camera->GetInverseWorldMatrix());
++        VxMatrix projection;
++        const float aspect = (renderContext->GetHeight() > 0)
++                                 ? (float)renderContext->GetWidth() / (float)renderContext->GetHeight()
++                                 : 4.0f / 3.0f;
++        projection.Perspective(camera->GetFov(), aspect, camera->GetFrontPlane(),
++                               camera->GetBackPlane());
++        renderContext->SetProjectionTransformationMatrix(projection);
++    }
++    log_line("free view off: level camera %s", alive ? "back in place" : "not found");
++}
++
++void CMinecraftCameraSync::ApplyFreeViewCamera(CKContext *context, CKRenderContext *renderContext)
++{
++    if (!m_FreeViewCamera || !m_Ball || !renderContext) return;
++
++    VxVector ball(0.0f, 0.0f, 0.0f);
++    m_Ball->GetPosition(&ball);
++
++    const float cosPitch = cosf(m_FreePitch);
++    const VxVector forward(sinf(m_FreeYaw) * cosPitch, sinf(m_FreePitch),
++                           cosf(m_FreeYaw) * cosPitch);
++    const VxVector eye(ball.x - forward.x * m_FreeDistance,
++                       ball.y - forward.y * m_FreeDistance,
++                       ball.z - forward.z * m_FreeDistance);
++
++    // The level camera's own optics, followed every frame: camera zones change
++    // the field of view, and the two images have to keep agreeing about it.
++    if (GameCameraAlive(context)) {
++        m_FreeViewCamera->SetFov(m_GameCamera->GetFov());
++        m_FreeViewCamera->SetFrontPlane(m_GameCamera->GetFrontPlane());
++        m_FreeViewCamera->SetBackPlane(m_GameCamera->GetBackPlane());
++    }
++
++    m_FreeViewCamera->SetPosition(&eye);
++    VxVector target = ball;
++    m_FreeViewCamera->LookAt(&target);
++
++    renderContext->AttachViewpointToCamera(m_FreeViewCamera);
++    renderContext->SetViewTransformationMatrix(m_FreeViewCamera->GetInverseWorldMatrix());
++    VxMatrix projection;
++    const float aspect = (renderContext->GetHeight() > 0)
++                             ? (float)renderContext->GetWidth() / (float)renderContext->GetHeight()
++                             : 4.0f / 3.0f;
++    projection.Perspective(m_FreeViewCamera->GetFov(), aspect, m_FreeViewCamera->GetFrontPlane(),
++                           m_FreeViewCamera->GetBackPlane());
++    renderContext->SetProjectionTransformationMatrix(projection);
++}
++
++void CMinecraftCameraSync::UpdateFreeView(CKContext *context, CKRenderContext *renderContext,
++                                          float deltaSeconds)
++{
++    if (!context || !renderContext) return;
++
++    // The pose the game itself asked for this frame. Ours is the one we attached,
++    // so anything else is news and is remembered: that is how a camera zone, a
++    // level change or the menu is noticed while the orbit holds the viewpoint,
++    // and it is what F gives the view back to.
++    CKCamera *attached = renderContext->GetAttachedCamera();
++    if (attached && attached != m_FreeViewCamera) {
++        m_GameCamera = attached;
++        m_GameCameraId = attached->GetID();
++    }
++
++    CKInputManager *input = (CKInputManager *)context->GetManagerByGuid(INPUT_MANAGER_GUID);
++    if (input) {
++        // Escape is the one menu signal that works in this port: SdlInputManager
++        // pins the cursor flag visible so menus stay clickable, and the flag
++        // therefore cannot tell a menu from gameplay (measured in
++        // MinecraftSteve.cpp). Escape opens Ballance's pause menu; a movement
++        // key takes the pointer back.
++        const bool escape = input->IsKeyDown(CKKEY_ESCAPE) != FALSE || key_tapped(input, CKKEY_ESCAPE);
++        // While Minecraft's inventory is on screen the pointer already belongs to
++        // it and this Escape is the one that closes it (M1b). Counting it as a
++        // Ballance menu as well would leave the level without a pointer until the
++        // next arrow key.
++        if (escape && !m_EscapeDown && !m_InventoryOpen) {
++            m_MenuReleased = !m_MenuReleased;
++            log_line("menu key: escape -> pointer %s", m_MenuReleased ? "released" : "captured");
++        }
++        m_EscapeDown = escape;
++
++        const CKDWORD movementKeys[] = {CKKEY_SPACE, CKKEY_UP, CKKEY_DOWN, CKKEY_LEFT,
++                                        CKKEY_RIGHT};
++        bool movement = false;
++        for (int i = 0; i < (int)(sizeof(movementKeys) / sizeof(movementKeys[0])); ++i) {
++            movement = movement || input->IsKeyDown(movementKeys[i]) != FALSE ||
++                       key_tapped(input, movementKeys[i]);
++        }
++        if (m_MenuReleased && movement && !m_MovementDown) {
++            m_MenuReleased = false;
++            log_line("menu key: movement -> pointer captured");
++        }
++        m_MovementDown = movement;
++
++        const bool f = input->IsKeyDown(CKKEY_F) != FALSE || key_tapped(input, CKKEY_F);
++        if (f && !m_FKeyDown) {
++            if (m_FreeViewOn) LeaveFreeView(context, renderContext);
++            else EnterFreeView(context, renderContext);
++        }
++        m_FKeyDown = f;
++    }
++
++    if (!m_FreeViewOn) return;
++
++    const bool ballAlive = m_Ball && BallAlive(context);
++    if (!ballAlive) {
++        // A fall deletes the ball and rebuilds it a second later, while the
++        // level's own camera work carries on. Turning the free view off there
++        // would cost the player their camera every time they fall, so keep the
++        // last pose for a couple of seconds and give up only if the ball never
++        // comes back (a level change, or the level ending).
++        m_Ball = nullptr;
++        m_BallMissingSeconds += (deltaSeconds > 0.0f) ? deltaSeconds : 0.016f;
++        if (!GameCameraAlive(context) || m_BallMissingSeconds > kBallMissingGrace)
++            LeaveFreeView(context, renderContext);
++        return;
++    }
++    m_BallMissingSeconds = 0.0f;
++
++    // Only inside a level. The menu's camera looks at a map, and the "ball" there
++    // is a decorative pickup parked somewhere: orbiting it would lock the menu.
++    if (!GameCameraAlive(context)) {
++        LeaveFreeView(context, renderContext);
++        return;
++    }
++    const char *gameCameraName = m_GameCamera->GetName();
++    if (gameCameraName && strcmp(gameCameraName, "Cam_MenuLevel") == 0) {
++        LeaveFreeView(context, renderContext);
++        return;
++    }
++
++    // The mouse turns the view only when the pointer is ours: the panel, the
++    // Minecraft inventory and Ballance's own menu all want a normal pointer, and
++    // turning the world under it would be a bug in each of them.
++    if (input && !m_PanelOpen && !m_InventoryOpen && !m_MenuReleased) {
++        VxVector relative(0.0f, 0.0f, 0.0f);
++        input->GetMouseRelativePosition(relative);
++        if (relative.x != 0.0f || relative.y != 0.0f) {
++            const float sensitivity = m_Settings ? m_Settings->GetFloat(eMcSensitivity) : 0.0025f;
++            // A rightward drag adds to yaw, the same sign the Steve rig's look
++            // uses (MinecraftSteve.cpp: it subtracted until 2026-11-07 and the
++            // view turned the wrong way under the pointer).
++            m_FreeYaw += relative.x * sensitivity;
++            m_FreePitch -= relative.y * sensitivity;
++            if (m_FreePitch > kFreeViewMaxPitch) m_FreePitch = kFreeViewMaxPitch;
++            if (m_FreePitch < -kFreeViewMaxPitch) m_FreePitch = -kFreeViewMaxPitch;
++            while (m_FreeYaw > kPiRadians) m_FreeYaw -= 2.0f * kPiRadians;
++            while (m_FreeYaw < -kPiRadians) m_FreeYaw += 2.0f * kPiRadians;
++        }
++    }
++
++    ApplyFreeViewCamera(context, renderContext);
++}
++
++
++bool CMinecraftCameraSync::WantsRelativeMouse() const
++{
++    return m_FreeViewOn && !m_PanelOpen && !m_InventoryOpen && !m_MenuReleased;
++}
++
 +void CMinecraftCameraSync::Frame(CKContext *context, CKRenderContext *renderContext, float deltaSeconds)
 +{
 +    if (!m_Initialised) {
@@ -1766,6 +2033,12 @@ index 0000000..e1a8924
 +    if (!context || !renderContext) return;
 +
 +    ++m_Frame;
++
++    // The free view needs the ball before the header is built, and it may
++    // re-attach the viewpoint: both have to happen before the camera below is
++    // read, so what the header carries is what the frame is drawn from.
++    FindBall(context);
++    UpdateFreeView(context, renderContext, deltaSeconds);
 +
 +    MpCameraHeader header = {};
 +    header.Magic = MPC_MAGIC;
@@ -1829,7 +2102,6 @@ index 0000000..e1a8924
 +                        ? (float)header.Width / (float)header.Height
 +                        : (header.FovY > 0.0f ? 4.0f / 3.0f : 1.0f);
 +
-+    FindBall(context);
 +    if (m_Ball && BallAlive(context)) {
 +        VxVector ball(0.0f, 0.0f, 0.0f);
 +        m_Ball->GetPosition(&ball);
@@ -1924,10 +2196,10 @@ index 0000000..e1a8924
 +}
 diff --git a/src/MinecraftCameraSync.h b/src/MinecraftCameraSync.h
 new file mode 100644
-index 0000000..1269567
+index 0000000..20a6b5b
 --- /dev/null
 +++ b/src/MinecraftCameraSync.h
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,176 @@
 +#ifndef PLAYER_MINECRAFTCAMERASYNC_H
 +#define PLAYER_MINECRAFTCAMERASYNC_H
 +
@@ -2001,6 +2273,24 @@ index 0000000..1269567
 +    // is on screen, so the freeze can be exercised without a Minecraft client.
 +    bool InventoryOpen() const { return m_InventoryOpen; }
 +
++    // The settings panel owns the pointer while it is open: no orbit, and the
++    // pointer stays an ordinary pointer.
++    void SetPanelOpen(bool open) { m_PanelOpen = open; }
++
++    // Free view (F): the camera orbits the ball and the mouse aims it.
++    //
++    // Third person on purpose. The community FreeFirstPersonCamera
++    // (docs/free-camera.md) answers the same question for the vanilla
++    // Player.exe, and its 360Mode = 0 default is the convention followed here:
++    // world-Y yaw, pitch clamped to +-85 degrees, and nothing written back into
++    // the level's own camera or into the ball's steering. It is a viewpoint,
++    // not a mode of play.
++    bool FreeViewOn() const { return m_FreeViewOn; }
++
++    // The pointer has to be captured (relative mode) while the orbit is live, or
++    // it stops at the window edge and so do the deltas.
++    bool WantsRelativeMouse() const;
++
 +private:
 +    bool Initialise();
 +    void Release();
@@ -2011,6 +2301,15 @@ index 0000000..1269567
 +    void PublishInput(CKContext *context, CKRenderContext *renderContext, MpCameraHeader &header);
 +    void SyncInventoryState(CKContext *context, CKInputManager *input);
 +    float AimLiftRadians() const;
++
++    // Free view: F toggles an orbit round the ball. All six of these run on the
++    // render thread, before the pose this frame is drawn from is published.
++    void UpdateFreeView(CKContext *context, CKRenderContext *renderContext, float deltaSeconds);
++    bool EnsureFreeViewCamera(CKContext *context);
++    bool GameCameraAlive(CKContext *context) const;
++    void EnterFreeView(CKContext *context, CKRenderContext *renderContext);
++    void LeaveFreeView(CKContext *context, CKRenderContext *renderContext);
++    void ApplyFreeViewCamera(CKContext *context, CKRenderContext *renderContext);
 +
 +    bool m_Enabled = false;
 +    bool m_Initialised = false;
@@ -2053,6 +2352,27 @@ index 0000000..1269567
 +
 +    float m_LogTimer = -1.0f;
 +    uint64_t m_Publishes = 0;
++
++    // Free view state. The two angles are the *view* direction, the same
++    // convention the Steve rig's look uses (+X is to the right when looking
++    // along +Z), and the camera sits at ball - forward * distance, so the ball
++    // stays dead centre -- that is what makes an orbit read as an orbit.
++    bool m_PanelOpen = false;
++    bool m_FreeViewOn = false;
++    bool m_FKeyDown = false;
++    bool m_EscapeDown = false;
++    bool m_MovementDown = false;
++    bool m_MenuReleased = false;
++    float m_FreeYaw = 0.0f;
++    float m_FreePitch = 0.4416f; // 25 degrees above the ball until a camera says better
++    float m_FreeDistance = 8.0f;
++    // Seconds the ball has been missing. A respawn deletes and rebuilds it, and
++    // the orbit has to survive that; a level that went away entirely has to not.
++    float m_BallMissingSeconds = 0.0f;
++    CKCamera *m_FreeViewCamera = nullptr;
++    CK_ID m_FreeViewCameraId = 0;
++    CKCamera *m_GameCamera = nullptr;
++    CK_ID m_GameCameraId = 0;
 +};
 +
 +#endif // PLAYER_MINECRAFTCAMERASYNC_H
