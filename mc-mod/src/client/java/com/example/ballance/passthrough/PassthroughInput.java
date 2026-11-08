@@ -10,6 +10,7 @@ import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.phys.HitResult;
 import org.slf4j.Logger;
@@ -301,13 +302,25 @@ public final class PassthroughInput {
                 // block is spawned at the end of the reach instead. Once one exists the ray hits
                 // it and the vanilla branch takes over, with no special case left behind.
                 if (aimingAtBlock(client) || !placeAtAim(client)) {
+                    // The placement packet is built from this field later in the tick, so it
+                    // is refreshed from the very pick that is about to be logged and acted on.
+                    // A stale one is a placement the server refuses and the client takes back:
+                    // the block flashes for a frame and is gone.
+                    final HitResult aim = aimResult(client);
+                    if (aim != null) {
+                        client.hitResult = aim;
+                    }
+                    LOGGER.info("world right press aim={} held={} {}", describe(aim),
+                            client.player.getMainHandItem(), serverView(client));
                     mouseKey(3, true);
                 }
             } else {
                 mouseKey(3, false);
             }
-            LOGGER.info("world right {} aim={} held={}", down ? "press" : "release",
-                    describe(aimResult(client)), client.player.getMainHandItem());
+            if (!down) {
+                LOGGER.info("world right release aim={} held={}",
+                        describe(aimResult(client)), client.player.getMainHandItem());
+            }
         }
         if ((changed & McCameraChannel.BUTTON_MIDDLE) != 0) {
             final boolean down = (buttons & McCameraChannel.BUTTON_MIDDLE) != 0;
@@ -330,6 +343,41 @@ public final class PassthroughInput {
                         delta / McCameraChannel.WHEEL_UNITS_PER_NOTCH);
             }
         }
+    }
+
+    /**
+     * The position and block state the <b>server</b> has, next to the client's (2026-11-08).
+     *
+     * <p>"That one spot never takes a block, anywhere else is fine" looks identical whether
+     * the client is aiming at nothing or the server is refusing what it sent: both end with no
+     * block. The server's player position and its own copy of the target block are what tells
+     * the two apart, so every right press prints both.
+     */
+    private static String serverView(Minecraft client) {
+        final IntegratedServer server = client.getSingleplayerServer();
+        if (server == null || client.player == null || client.level == null) {
+            return "srv=(none)";
+        }
+        final ServerLevel level = server.getLevel(client.level.dimension());
+        if (level == null) {
+            return "srv=(no level)";
+        }
+        final java.util.List<ServerPlayer> players = server.getPlayerList().getPlayers();
+        if (players.isEmpty()) {
+            return "srv=(no player)";
+        }
+        final ServerPlayer player = players.get(0);
+        final HitResult hit = client.hitResult;
+        final BlockPos target = hit instanceof net.minecraft.world.phys.BlockHitResult block
+                ? block.getBlockPos().relative(block.getDirection()) : null;
+        final var serverEye = player.getEyePosition();
+        final var clientEye = client.player.getEyePosition();
+        return String.format("srvEye=(%.2f,%.2f,%.2f) cliEye=(%.2f,%.2f,%.2f) off=%.2f target=%s clientSays=%s serverSays=%s",
+                serverEye.x, serverEye.y, serverEye.z,
+                clientEye.x, clientEye.y, clientEye.z,
+                serverEye.distanceTo(clientEye), target,
+                target == null ? "-" : client.level.getBlockState(target),
+                target == null ? "-" : level.getBlockState(target));
     }
 
     /** Presses a mouse key the way {@code MouseHandler.onButton} leaves it for a world click. */

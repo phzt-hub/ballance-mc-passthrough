@@ -205,6 +205,17 @@ public final class LevelVoxels {
         activeOffsetY = offsetY(set);
         McCameraMapper.setAbsolute(activeOffsetY);
         active = set;
+        // The placement state belongs to the set it was allocated for. Adopting a level here
+        // and leaving the old array behind used to index past its end one tick later
+        // (2026-11-08 15:02:45: Index 7206 out of bounds for length 7206 -- level 3 adopted
+        // while level 6's done[] was still in place, and the scan came back round to 7206).
+        // Whatever is half-placed is dropped: the caller either places this level (see
+        // beginPlacement) or uses a baked world that already has its blocks.
+        done = null;
+        cursor = 0;
+        placed = 0;
+        cleared = 0;
+        summarised = false;
         LOGGER.info("voxels: level {} from {} ({} cells), anchor y {}.",
                 id, why, set.count, activeOffsetY);
         return true;
@@ -327,6 +338,20 @@ public final class LevelVoxels {
             return;
         }
         final VoxelSet set = active;
+        // A thrown-away array must never be read with a live set's index, whatever route put
+        // the mismatch here (see adopt).
+        if (done == null || done.length != set.count) {
+            done = new boolean[set.count];
+            cursor = 0;
+            placed = 0;
+            cleared = 0;
+            summarised = false;
+        }
+        // Every cell visited and nothing left to retry: walking 7000 entries per tick for ever
+        // would only cost the server thread.
+        if (cleared >= set.count) {
+            return;
+        }
         final var state = Blocks.BARRIER.defaultBlockState();
         int budget = CELLS_PER_TICK;
         int scanned = 0;

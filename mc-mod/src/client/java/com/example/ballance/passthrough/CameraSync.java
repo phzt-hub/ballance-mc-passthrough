@@ -2,6 +2,8 @@ package com.example.ballance.passthrough;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -308,5 +310,51 @@ public final class CameraSync {
             LOGGER.info("camera sync: {} samples, player at {} {} {}",
                     applied, (int) x, (int) y, (int) z);
         }
+    }
+
+    // ------------------------------------------------------------------ aim watch
+
+    private static String lastHitLabel;
+    private static int hitChanges;
+    private static long hitWindowNanos;
+
+    /**
+     * Counts how often the block under the crosshair changes, and says so once a second when
+     * it changed more often than a player could be re-aiming (2026-11-08).
+     *
+     * <p>The user's report was a blinking selection box. That box is drawn for
+     * {@code Minecraft.hitResult}, so a measurement of how that value moves is the difference
+     * between "the aim really is jumping" and "the aim is steady and the picture is what
+     * flickers" -- two different bugs with two different fixes.
+     */
+    public static void watchHitTarget(Minecraft client) {
+        final HitResult hit = client.hitResult;
+        final String label = hit == null ? "null"
+                : hit instanceof BlockHitResult block ? String.valueOf(block.getBlockPos())
+                : hit.getType().name();
+        if (!label.equals(lastHitLabel)) {
+            lastHitLabel = label;
+            ++hitChanges;
+        }
+        final long now = System.nanoTime();
+        if (hitWindowNanos == 0L) {
+            hitWindowNanos = now;
+            return;
+        }
+        final long span = now - hitWindowNanos;
+        if (span < 1_000_000_000L) {
+            return;
+        }
+        if (hitChanges >= 8 && client.player != null) {
+            LOGGER.info("aim target changed {} times in {} ms, now {} player=({},{},{}) yaw={} pitch={}",
+                    hitChanges, span / 1_000_000L, label,
+                    String.format("%.2f", client.player.getX()),
+                    String.format("%.2f", client.player.getY()),
+                    String.format("%.2f", client.player.getZ()),
+                    String.format("%.2f", client.player.getYRot()),
+                    String.format("%.2f", client.player.getXRot()));
+        }
+        hitWindowNanos = now;
+        hitChanges = 0;
     }
 }
