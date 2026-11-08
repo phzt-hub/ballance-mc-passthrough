@@ -33,6 +33,10 @@ import org.slf4j.LoggerFactory;
  * it opened is still on screen, because that is what freezes the level there. It has its own
  * sequence number, because the writer is the other process.
  *
+ * <p>M1c (2026-11-08) added the game's own level number to the same payload
+ * ({@link #OFF_LEVEL_ID}). It rides the seqlock with everything else, so a sample never
+ * pairs this frame's level with last frame's ball position.
+ *
  * <p>Offsets mirror MpCamera.h. A change there has to be repeated here and in
  * tools/passthrough/inspect-camera.py.
  */
@@ -67,6 +71,10 @@ public final class McCameraChannel {
     private static final int OFF_WHEEL = 120;
     private static final int OFF_KEY_E = 124;
     private static final int OFF_KEY_ESC = 128;
+    // --- M1c: which level the game loaded, from the number in its file name
+    // ("...\Level_03.nmo"); 0 = no level loaded yet, which is every menu frame and the
+    // frames around a level start.
+    private static final int OFF_LEVEL_ID = 132;
 
     // The status block this side writes (MPS_OFFSET in MpCamera.h).
     private static final int OFF_STATUS = 2048;
@@ -100,13 +108,20 @@ public final class McCameraChannel {
     private static final VarHandle STATUS_SEQ =
             MethodHandles.byteBufferViewVarHandle(int[].class, ByteOrder.nativeOrder());
 
-    /** One coherent sample of the channel. */
+    /**
+     * One coherent sample of the channel.
+     *
+     * <p>{@code levelId} is the number in the level file Ballance loaded. 0 means no level has
+     * been loaded yet (menus, and the frames around a level start). It is the only reliable way
+     * to name the level: working it out from where the ball stands ties on the five starts that
+     * share a floor (3, 5, 7, 9, 11).
+     */
     public record Pose(int seq, int flags, int width, int height,
                        double[] eye, double[] forward, double[] up,
                        float fovY, float aspect, float near, float far,
                        double[] ball, float unitsPerBlock, int frame,
                        float aimLift, float mouseX, float mouseY, int buttons, int wheel,
-                       int keyE, int keyEsc) {
+                       int keyE, int keyEsc, int levelId) {
         public boolean valid() {
             return (flags & FLAG_VALID) != 0;
         }
@@ -119,6 +134,8 @@ public final class McCameraChannel {
         public boolean inLevel() {
             return (flags & FLAG_LEVEL) != 0;
         }
+
+
     }
 
     private static MappedByteBuffer map;
@@ -248,11 +265,12 @@ public final class McCameraChannel {
             final int wheel = buffer.getInt(OFF_WHEEL);
             final int keyE = buffer.getInt(OFF_KEY_E);
             final int keyEsc = buffer.getInt(OFF_KEY_ESC);
+            final int levelId = buffer.getInt(OFF_LEVEL_ID);
             final int after = (int) SEQ.getAcquire(buffer, OFF_SEQ);
             if (before == after) {
                 return new Pose(after, flags, width, height, eye, forward, up,
                         fovY, aspect, near, far, ball, unitsPerBlock, frame,
-                        aimLift, mouseX, mouseY, buttons, wheel, keyE, keyEsc);
+                        aimLift, mouseX, mouseY, buttons, wheel, keyE, keyEsc, levelId);
             }
         }
         return null;

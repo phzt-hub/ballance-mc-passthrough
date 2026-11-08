@@ -50,7 +50,7 @@
 #include <stdint.h>
 
 #define MPC_MAGIC 0x3143504Du // 'M''P''C''1' little endian
-#define MPC_VERSION 2u
+#define MPC_VERSION 3u   // 3: LevelId (M1c)
 #define MPC_BYTES 4096u
 
 // Flags
@@ -95,7 +95,13 @@ typedef struct MpCameraHeader {
     int32_t Wheel;          // wheel notches accumulated since the writer started
     uint32_t KeyE;          // monotonic press counters; the reader keeps its own copy
     uint32_t KeyEsc;
-    uint32_t Reserved[22];  // keeps the struct well inside MPC_BYTES
+    // --- M1c (2026-11-08): which level the game is in.
+    // The number in the level file the game loaded ("...\Level_03.nmo"), read from
+    // the "Object Load" behavior that loaded it. 0 = "not known": menus, and the
+    // frames before a level file has been loaded. The reader treats 0 as "no answer"
+    // and falls back to identifying the level by position.
+    uint32_t LevelId;
+    uint32_t Reserved[21];  // keeps the struct well inside MPC_BYTES
 } MpCameraHeader;
 
 // Minecraft -> Ballance, at MPS_OFFSET in the same object. The camera channel

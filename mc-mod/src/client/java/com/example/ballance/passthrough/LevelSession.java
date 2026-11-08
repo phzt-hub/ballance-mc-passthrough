@@ -48,6 +48,18 @@ public final class LevelSession {
     private static final int LEVEL_CONFIRM_TICKS = 6;
     private static final int MENU_CONFIRM_TICKS = 10;
 
+    /**
+     * Extra ticks a level start waits for the game to publish its level number (2 s at 20 tps).
+     *
+     * <p>The flag that says "a level is running" comes from the attached camera, and the camera
+     * can be up a few frames before the level's SetLevelID behavior has run. Deciding in that
+     * window means deciding without the one field the decision actually needs, so the start
+     * waits for it -- briefly, and only when it is missing. A Player.exe that does not publish
+     * the field at all costs this two-second pause and nothing else.
+     */
+    private static final int LEVEL_ID_GRACE_TICKS = 40;
+    private static boolean levelIdMissingLogged;
+
     private enum State {
         IDLE,
         /** The old world has been dropped; the next world has not been created yet. */
@@ -139,6 +151,14 @@ public final class LevelSession {
             return;
         }
         if (outsideLevel && hasBall && levelTicks >= LEVEL_CONFIRM_TICKS) {
+            if (pose.levelId() == 0 && levelTicks < LEVEL_CONFIRM_TICKS + LEVEL_ID_GRACE_TICKS) {
+                if (!levelIdMissingLogged) {
+                    levelIdMissingLogged = true;
+                    LOGGER.info("level start: waiting for the game's level number ({} ticks so far)",
+                            levelTicks);
+                }
+                return;
+            }
             outsideLevel = false;
             onLevelEntered(client, pose);
             return;
@@ -149,18 +169,21 @@ public final class LevelSession {
     }
 
     private static void onLevelEntered(Minecraft client, McCameraChannel.Pose pose) {
-        // Which level is this? The import needs the answer (it decides the mapping and which
-        // baked world to copy), and the ball is the only thing that knows: every level lives at
-        // its own absolute coordinates, so the floor closest under the ball names the level.
-        pendingLevel = LevelVoxels.identify(pose.ball());
+        // Which level is this? The import needs the answer: it decides the mapping and which
+        // baked world to copy. The game publishes it (the level file it loaded); the ball's
+        // position
+        // is only the fallback, because five of the thirteen starts sit on the same floor.
+        pendingLevel = LevelVoxels.identify(pose.ball(), pose.levelId());
+        levelIdMissingLogged = false;
         pendingTemplate = false;
         if (pendingLevel == 0) {
             // Nothing matched: fall back to the behaviour from before the import, where the
             // ball's position defines the origin of a plain void world.
             McCameraMapper.reanchor(pose);
         }
-        LOGGER.info("level start: level {} ball at {} -> mapping {}",
+        LOGGER.info("level start: level {} (the game says {}) ball at {} -> mapping {}",
                 pendingLevel == 0 ? "?" : pendingLevel,
+                pose.levelId() == 0 ? "?" : pose.levelId(),
                 String.format("(%.1f, %.1f, %.1f)", pose.ball()[0], pose.ball()[1], pose.ball()[2]),
                 McCameraMapper.describe());
         if (!McWorldBootstrap.isPassthroughWorld()) {

@@ -67,6 +67,7 @@ J:\bmc-project\run-ballance.bat    :: 2) 带 BALLANCE_MC_PASSTHROUGH=1 起 Balla
 | 自由视角：按 F 绕球转镜头，球的行进方向一点不变 | ✅ 11-08 | [docs/free-view.md](docs/free-view.md) |
 | 关卡地形导入：球道/墙/柱子变成**看不见的** barrier，红石、铁轨、火把有地方放 | ✅ 11-08 | [docs/voxel-import.md](docs/voxel-import.md) |
 | 13 关预烘成存档模板，进关卡拷一份；每次进关新实例，旧的按时间戳留档 | ✅ 11-08 | [docs/voxel-import.md](docs/voxel-import.md) |
+| **认得出是哪一关**：Ballance 把自己加载的关卡文件名（`Level_03.nmo`）写进相机通道，MC 按号取模板 | ✅ 11-08 M1c | [docs/voxel-import.md](docs/voxel-import.md) 第五节 |
 
 尺度：**1 方块 = 5.48 Ballance 单位**（默认值，F1 面板第 8 行可改）。4.0 是标定表里「一个球径」的数，
 但和变球器 `P_Trafo_*` 的 5.48 对不上，取后者，理由见 [docs/scale-calibration.md](docs/scale-calibration.md)；

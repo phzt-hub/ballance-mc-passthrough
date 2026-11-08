@@ -84,13 +84,37 @@ z = -floor(units.z / cell) - 1           // 相机映射把 Z 镜像，格子因
 * 旧的「每关一个锚点」（McCamerMapper.reanchor）在绝对模式下变成空操作：否则每关把球对到
   (0,100,0) 会和烘死的方块错开。
 
-## 五、认关卡：靠球自己的位置
+## 五、认关卡：游戏自己报关号（M1c，2026-11-08 下午改）
 
-Minecraft 那边没有任何东西知道 Ballance 正在哪一关——关卡文件是引擎的 Object Load 行为读的，
-要拿到文件名得改 CK2（另一个 submodule）。所以换成量出来的办法：
+Minecraft 那边原本没有任何东西知道 Ballance 正在哪一关。第一版是**量出来的**：13 关各占不同绝对
+坐标，球站在自己那关的地面上，把球的位置和 13 份可走面比一遍，最近的那关就是它。它在关卡 1 上很准
+（0.64 格），但 **第 3、5、7、9、11 关的起点地板落在同一个位置**（实测五关全是 0.7 格）——平票，
+一关都认不出，于是退回虚空世界。用户报的「进去一片虚空」就是这个：13 份模板当时一份都没被解出来。
 
-> 13 关各自占着不同的绝对坐标，球站在自己那关的地面上。把球的位置拿去和 13 份可走面比一遍，
-> 最近的那一关就是它。
+现在改成游戏自己说关号。**注意：不是 `CGameInfo::levelID`** —— 那个看着最像答案
+（游戏内 HUD 印的就是它、`SetLevelID` 行为也真的写它），但发行版关卡一个都没写过它：2026-11-08 实测，
+进第 1 关读 0（球在 54, 16, -153）、进第 3 关也读 0（球在原点），两次 `MPC_FLAG_LEVEL` 都是亮的。
+
+真正拿得到的是**文件名**：每关都由 `Object Load` 行为加载，那个行为的第一个输入参数一直是它加载的路径
+——实测第 3 关读出来是 `3D Entities\Level\Level_03.nmo`。Player 侧扫一遍所有名字叫 `Object Load`
+的行为，取路径里 `Level_NN` 的那个号（`level_number_from_context`，2 Hz 扫一次），发布到相机通道：
+
+| | |
+|---|---|
+| 字段 | `MpCameraHeader.LevelId`（偏移 132，`MPC_VERSION` 2 → 3） |
+| 写 | `MinecraftCameraSync::Frame()`：只在 `MPC_FLAG_LEVEL` 成立时扫，菜单里发 0 |
+| 读 | `McCameraChannel.Pose.levelId()` → `LevelVoxels.identify(ball, levelId)` |
+| 等 | 关号没到之前不认关：`LevelSession` 最多等 `LEVEL_CONFIRM_TICKS + 40`（2 秒） |
+| 诊断 | `BALLANCE_MC_DEBUG_LEVEL=1` 每秒把场上所有 level 对象和带 Load 的行为参数打到 stderr |
+
+关号是 1..13 又有对应模板，就直接取那一份；比例对不上（模板烘在别的 `UnitsPerBlock`）照样拒绝，
+不拿猜的顶上。三层退路，按顺序：
+
+1. `BALLANCE_MC_LEVEL=<n>` 环境变量，优先级最高（烘模板、单关测试用）；
+2. 关号 0 = 没消息（旧的 Player.exe），走球位置的判据；
+3. 关号 >13（自定义地图）打一行 log，也走球位置的判据。
+
+### 退路判据（球的位置）
 
 Level_01 起点 (54.1, 17.7, -153.1) 实测：
 
@@ -103,9 +127,9 @@ Level_01 起点 (54.1, 17.7, -153.1) 实测：
 | 8 | 12.14 |
 | 其余 | 12–146 |
 
-判据是「最近的可走面 ≤ 1.8 格」：0.64 过，2.8 不过，不会认错；真实一关里球离地面通常不到半格。
-认不出来时退回旧行为（虚空世界 + 按球设锚点），日志里写明分数表，不会静默铺错。
-BALLANCE_MC_LEVEL=<n> 可以强制指定，给测试用。
+判据是「最近的可走面 ≤ 4.0 格**且**比第二名近 40% 以上」：0.64 过，2.8 不过，不会认错；
+真实一关里球离地面通常不到半格。认不出时退回旧行为（虚空世界 + 按球设锚点），日志写明分数表，
+不会静默铺错。
 
 ## 六、存档：模板、实例、留档
 
@@ -164,6 +188,26 @@ voxels: vanilla right-click test on a barrier -> Success[swingSource=PREDICTED, 
 
 另外：`enter-level.sh` 只进第 1 关，所以测试只覆盖了第 1 关的模板；其余 12 份的烘焙日志
 （`run/bake-logs/`）各自有一行 BAKE DONE 和格数，可以逐个核对。
+
+### 2026-11-08 下午（M1c：按关号取模板）
+
+`./tools/voxel/test-import.sh 3` —— 就是用户报虚空的那类关卡（起点在原点，位置判据平票）：
+
+~~~
+level start: level 3 (the game says 3) ball at (0.0, 5.8, 0.1) -> mapping anchor=(0.0, 100.0, 0.0)
+voxels: level 3 from the game's own level id (7640 cells), anchor y 100.
+opening the baked world for Level_03 as "passthrough-2" (32 files)
+world ready: "passthrough-2" (previous save "passthrough")
+voxels: under the ball at BlockPos{x=-1, y=101, z=-1} (0 below) is Block{minecraft:barrier}[waterlogged=false]
+PASS: level 3, baked world, barrier under the ball
+~~~
+
+`./tools/voxel/test-import.sh 1` 回归（起点 (54.1, 16.0, -153.0)，旧的位置判据本来也认得出来）：
+同样走「level 1 from the game's own level id (7581 cells)」→ Level_01 → 球下方是 barrier，PASS。
+
+为此补了 `tools/passthrough/enter-level-n.sh <n>`：原来 `enter-level.sh` 只会点第 1 关、
+`enter-level-8.sh` 写死第 8 关。新脚本先去 CREDITS 页输 `gravity` 解锁全部 13 关，再按
+28.76 px 的行距点第 n 关；`test-import.sh <n>` 在 n≠1 时自动用它。
 
 ## 八、坑
 

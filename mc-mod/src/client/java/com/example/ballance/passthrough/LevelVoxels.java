@@ -33,10 +33,11 @@ import java.nio.ByteOrder;
  * baked into a save once ({@code BALLANCE_MC_BAKE=<n>}) and shipped: the world already contains
  * the level, so a level start only has to copy it.
  *
- * <p>Which level: nothing tells Minecraft which level Ballance is in. Since every level occupies
- * its own absolute coordinates, the ball's own position identifies the level instead -- the level
- * whose walkable floor passes closest under the ball wins, and the full score table is logged so
- * a wrong match is visible instead of silent.
+ * <p>Which level: the game says so (M1c, 2026-11-08). The number in the level file Ballance
+ * loaded travels in the camera channel as {@link McCameraChannel.Pose#levelId()}. Until then the level was guessed from the ball's
+ * position, which ties on the five levels that share a start floor (3, 5, 7, 9, 11) -- and a tie
+ * meant no level at all. The position is kept as the fallback, for a client that meets an older
+ * Player.exe.
  *
  * <p>Off with {@code BALLANCE_MC_VOXELS=0}. {@code BALLANCE_MC_LEVEL=<1..13>} forces a level.
  */
@@ -149,12 +150,74 @@ public final class LevelVoxels {
      * <p>Called at a level start, before the world is created, because the answer decides which
      * baked world to copy.
      *
-     * @return 1..13, or 0 when nothing is close enough (then the caller should fall back)
+     * <p>Since M1c (2026-11-08) the answer comes from the game itself: the number in the level
+     * file it loaded, which the Ballance side publishes in the camera channel. It used to
+     * be derived from where the ball stood -- "the level whose walkable floor passes closest
+     * under the ball" -- and that cannot be relied on: levels 3, 5, 7, 9 and 11 share their
+     * start floor (measured 2026-11-08: all five scored 0.7 cells), so the vote ties and no
+     * level was loaded. The position is kept as the fallback, for a Ballance build that does
+     * not publish the number.
+     *
+     * @param ballUnits the player ball, in Ballance units
+     * @param levelId   the level the game loaded, from the same sample; 0 = unknown
+     * @return 1..13, or 0 when nothing is known well enough (then the caller should fall back)
      */
-    public static int identify(double[] ballUnits) {
+    public static int identify(double[] ballUnits, int levelId) {
         if (!ENABLED) {
             return 0;
         }
+        // BALLANCE_MC_LEVEL still wins: it is how the templates were baked and how a
+        // mislabelled level is tested without touching the game.
+        final int forced = readInt("BALLANCE_MC_LEVEL");
+        final int named = forced > 0 ? forced : levelId;
+        if (named > 0 && named <= LEVEL_COUNT) {
+            if (set(named) == null) {
+                LOGGER.warn("voxels: level {} has no baked data in this build ({}); falling back"
+                        + " to the ball position", named,
+                        forced > 0 ? "BALLANCE_MC_LEVEL" : "the game says so");
+            } else if (adopt(named, forced > 0
+                    ? "BALLANCE_MC_LEVEL=" + forced
+                    : "the game's own level id")) {
+                return named;
+            } else {
+                // The data is there but was baked for another block size: that is not a
+                // guess to be patched up with a different level.
+                return 0;
+            }
+        } else if (named > LEVEL_COUNT) {
+            // A custom map, or a game whose counter means something else. Not an error.
+            LOGGER.info("voxels: the game says level {}", named);
+        }
+        return identifyByPosition(ballUnits);
+    }
+
+    /** Takes one level as the answer: checks the block size, pins the anchor, says why. */
+    private static boolean adopt(int id, String why) {
+        final VoxelSet set = set(id);
+        final double cell = currentCell();
+        if (Math.abs(set.cell - cell) > 1.0e-3) {
+            LOGGER.warn(String.format(
+                    "voxels: level %d is baked for a %.2f u block but the panel says %.2f u; the"
+                            + " import needs re-baking at the new size. Not placing.",
+                    id, set.cell, cell));
+            return false;
+        }
+        activeOffsetY = offsetY(set);
+        McCameraMapper.setAbsolute(activeOffsetY);
+        active = set;
+        LOGGER.info("voxels: level {} from {} ({} cells), anchor y {}.",
+                id, why, set.count, activeOffsetY);
+        return true;
+    }
+
+    /**
+     * The old answer: the level whose walkable floor passes closest under the ball.
+     *
+     * <p>Kept because a client can be newer than the Player.exe it runs against, and because
+     * it is the independent check that the published number is not a lie -- the two agreeing
+     * is worth knowing, and the scores are logged either way.
+     */
+    private static int identifyByPosition(double[] ballUnits) {
         VoxelSet best = null;
         double bestScore = Double.MAX_VALUE;
         double secondScore = Double.MAX_VALUE;
@@ -178,12 +241,6 @@ public final class LevelVoxels {
             LOGGER.warn("voxels: no baked level found in the mod's resources");
             return 0;
         }
-        final int forced = readInt("BALLANCE_MC_LEVEL");
-        if (forced > 0 && forced <= LEVEL_COUNT && set(forced) != null) {
-            best = set(forced);
-            bestScore = best.distance(ballUnits);
-            LOGGER.info("voxels: BALLANCE_MC_LEVEL={} forces {}", forced, best.describe());
-        }
         if (bestScore > MATCH_CELLS || bestScore > MATCH_LEAD * secondScore) {
             LOGGER.warn("voxels: no level is under the ball (closest {} at {} cells, runner-up {};"
                             + " limit {} / lead {}); scores:{}", best.id,
@@ -191,21 +248,8 @@ public final class LevelVoxels {
                     MATCH_CELLS, MATCH_LEAD, scores);
             return 0;
         }
-        final double cell = currentCell();
-        if (Math.abs(best.cell - cell) > 1.0e-3) {
-            LOGGER.warn(String.format(
-                    "voxels: baked for a %.2f u block but the panel says %.2f u; the import needs"
-                            + " re-baking at the new size. Not placing.", best.cell, cell));
-            return 0;
-        }
-        final int offsetY = offsetY(best);
-        McCameraMapper.setAbsolute(offsetY);
-        active = best;
-        activeOffsetY = offsetY;
-        LOGGER.info("voxels: level {} ({} cells), ball is {} cells above its floor, anchor y {}."
-                        + " scores:{}", best.id, best.count, String.format("%.2f", bestScore),
-                offsetY, scores);
-        return best.id;
+        return adopt(best.id, String.format("the ball position (%.2f cells, runner-up %.2f;"
+                + " scores:%s)", bestScore, secondScore, scores)) ? best.id : 0;
     }
 
     /** The vertical offset this level was baked with (see {@link #offsetY(VoxelSet)}). */

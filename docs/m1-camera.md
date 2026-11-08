@@ -23,6 +23,10 @@ McCampaChannel 按偏移读，tools/passthrough/inspect-camera.py 是独立第�
 字段：Eye/Forward/Up（Ballance 单位）、FovY（弧度）、Aspect/Near/Far、Ball（球心，单位）、
 UnitsPerBlock、Frame、TimeNs，外加 Flags（VALID/BALL/PAUSED）。
 
+2026-11-08（M1c，见 [voxel-import.md](voxel-import.md) 第五节）起，同一个载荷里还带着 `LevelId`：
+Ballance 正在玩第几关（读的是它加载的文件名 `Level_03.nmo` → 3，来源是 `Object Load` 行为的
+第一个输入参数）。看着更顺手的 `CGameInfo::levelID` 发行版关卡从来不写，实测两次都是 0。
+
 ## 二、三个必须写下来的坑
 
 ### 1. --level 拿不到游戏镜头

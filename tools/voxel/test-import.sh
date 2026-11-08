@@ -2,7 +2,8 @@
 # Acceptance for the level import: a level starts, its baked world is copied in,
 # and there is a barrier block under the ball (the thing redstone needs).
 #
-#   ./test-import.sh [level]        default 1
+#   ./test-import.sh [level]        default 1; any of 1..13 (past the first, the
+#                                   level list is unlocked with the credits cheat)
 #
 # Needs a display (Xvfb :99 here), the mod built, and tools/voxel/package-templates.sh
 # already run so the jar carries the templates.
@@ -39,7 +40,13 @@ BALLANCE_MC_PASSTHROUGH=1 BALLANCE_MC_CAMERA=1 BALLANCE_MC_STEVE=0 BALLANCE_MC_S
 GAME=$!
 for _ in $(seq 1 120); do xdotool search --name Ballance >/dev/null 2>&1 && break; sleep 0.5; done
 sleep 4
-"$ROOT/tools/passthrough/enter-level.sh" 4 6 || echo "   (menu click reported a problem)"
+if [ "$LEVEL" = 1 ]; then
+    "$ROOT/tools/passthrough/enter-level.sh" 4 6 || echo "   (menu click reported a problem)"
+else
+    # Levels past the first are only reachable with the level list unlocked, which the
+    # credits cheat does; see tools/passthrough/enter-level-n.sh.
+    "$ROOT/tools/passthrough/enter-level-n.sh" "$LEVEL" 4 || echo "   (menu click reported a problem)"
+fi
 
 for _ in $(seq 1 120); do
     grep -qa 'voxels: under the ball' "$OUT/mc.log" && break

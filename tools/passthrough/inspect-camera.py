@@ -24,6 +24,10 @@ MPC_MAGIC = 0x3143504D
 MPC_BYTES = 4096
 FLAG_VALID, FLAG_BALL, FLAG_PAUSED, FLAG_LEVEL = 0x1, 0x2, 0x4, 0x8
 
+# M1c: which level the game loaded, from the number in its file name. 0 = no level
+# loaded yet (menus, and the frames around a level start).
+MPC_OFF_LEVEL_ID = 132
+
 LAYOUT = "<IIIIII" + "3f" * 3 + "4f" + "3f" + "f" + "I" + "Q"
 # magic, version, seq, flags, width, height, eye, forward, up, fovy, aspect, near,
 # far, ball, unitsPerBlock, frame, timeNs
@@ -48,20 +52,22 @@ def read_once(fd) -> tuple:
             raise SystemExit("short read: %d bytes" % len(raw))
         before = struct.unpack_from("<I", raw, 8)[0]
         value = struct.unpack_from(LAYOUT, raw, 0)
+        level_id = struct.unpack_from("<I", raw, MPC_OFF_LEVEL_ID)[0]
         after = struct.unpack_from("<I", raw, 8)[0]
         if before == after and before != 0:
-            return value
+            return value + (level_id,)
     raise SystemExit("the writer is publishing faster than this script can read")
 
 
 def describe(v) -> str:
     (magic, version, seq, flags, width, height,
      ex, ey, ez, fx, fy, fz, ux, uy, uz,
-     fovy, aspect, near, far, bx, by, bz, upb, frame, tns) = v
+     fovy, aspect, near, far, bx, by, bz, upb, frame, tns, level_id) = v
     lines = [
         "magic     0x%08X %s" % (magic, "ok" if magic == MPC_MAGIC else "MISMATCH"),
         "version   %d" % version,
         "seq       %d   frame %d" % (seq, frame),
+        "level     %d%s" % (level_id, "" if level_id else "  (the game has not said)"),
         "flags     0x%X%s%s%s%s" % (
             flags,
             " VALID" if flags & FLAG_VALID else "",

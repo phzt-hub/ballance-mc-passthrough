@@ -1250,10 +1250,10 @@ index 3b54c38..5526b84 100644
  #endif /* PLAYER_GAMEPLAYER_H */
 diff --git a/src/MinecraftCameraSync.cpp b/src/MinecraftCameraSync.cpp
 new file mode 100644
-index 0000000..b36f972
+index 0000000..bb27d81
 --- /dev/null
 +++ b/src/MinecraftCameraSync.cpp
-@@ -0,0 +1,940 @@
+@@ -0,0 +1,1076 @@
 +#include "MinecraftCameraSync.h"
 +
 +#include "MinecraftSettings.h"
@@ -1318,6 +1318,100 @@ index 0000000..b36f972
 +        }
 +    }
 +    return false;
++}
++
++// "…/3D Entities/Level/Level_03.NMO" -> 3; anything else -> 0.
++//
++// The number comes from the file name because nothing else survives: see the
++// LevelId block in CMinecraftCameraSync::Frame().
++int level_number_from_path(const char *path)
++{
++    if (!path || !*path) return 0;
++    const char *base = path;
++    for (const char *p = path; *p; ++p) {
++        if (*p == '/' || *p == '\\') base = p + 1;
++    }
++    static const char kPrefix[] = "level_";
++    for (int i = 0; i < 6; ++i) {
++        char c = base[i];
++        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
++        if (c != kPrefix[i]) return 0;
++    }
++    const char *p = base + 6;
++    if (*p < '0' || *p > '9') return 0;
++    int value = 0;
++    while (*p >= '0' && *p <= '9') {
++        value = value * 10 + (*p - '0');
++        if (value > 9999) return 0;
++        ++p;
++    }
++    return value;
++}
++
++// Which level file the game loaded, read out of the behavior that loaded it.
++//
++// Ballance loads every level through an "Object Load" behavior, and the path it
++// loads stays in that behavior's first input parameter: measured 2026-11-08 in
++// level 3, "3D Entities\\Level\\Level_03.nmo". That is the only place the number
++// exists -- the level objects themselves are all named "Level", and
++// CGameInfo::levelID is never written by the shipped levels.
++//
++// Several "Object Load" behaviors exist (the level, PE_Balloon, ...), so the value
++// has to look like a level file, not merely be a string.
++int level_number_from_context(CKContext *context)
++{
++    const XObjectPointerArray behaviors = context->GetObjectListByType(CKCID_BEHAVIOR, TRUE);
++    for (CKObject **it = behaviors.Begin(); it != behaviors.End(); ++it) {
++        CKBehavior *beh = (CKBehavior *)*it;
++        if (!beh || beh->GetInputParameterCount() < 1) continue;
++        const char *name = beh->GetName();
++        if (!name || strcmp(name, "Object Load") != 0) continue;
++        // No type check: this build's CK2 does not expose the string type constant,
++        // and the shape of the value is the test anyway -- a parameter that is not a
++        // string fails it (measured: "Load Database" and "Sound Load" come back with
++        // bytes that do not start with a printable character).
++        const char *value = (const char *)beh->GetInputParameterReadDataPtr(0);
++        if (!value || (unsigned char)value[0] < 0x20 || (unsigned char)value[0] > 0x7e) continue;
++        const int id = level_number_from_path(value);
++        if (id > 0) return id;
++    }
++    return 0;
++}
++
++// Diagnostic (BALLANCE_MC_DEBUG_LEVEL=1): what the context knows about the level
++// that was just loaded. Run once a second while a level is up, because the answer
++// decides how the Minecraft side can name the world it builds.
++void log_level_candidates(CKContext *context)
++{
++    const XObjectPointerArray levels = context->GetObjectListByType(CKCID_LEVEL, TRUE);
++    int shown = 0;
++    for (CKObject **it = levels.Begin(); it != levels.End(); ++it) {
++        CKObject *object = *it;
++        if (!object) continue;
++        CKLevel *level = (CKLevel *)object;
++        const char *name = object->GetName();
++        log_line("debug: level object %p \"%s\" scene=%p", (void *)level,
++                 name ? name : "(none)", (void *)level->GetLevelScene());
++        if (++shown >= 8) break;
++    }
++
++    // "Object Load" keeps the file it loaded in its first input parameter. Read the
++    // bytes only when they look like a printable path, so a parameter that is a
++    // variable (its data pointer is not a string at all) cannot crash the frame.
++    const XObjectPointerArray behaviors = context->GetObjectListByType(CKCID_BEHAVIOR, TRUE);
++    int loads = 0;
++    for (CKObject **it = behaviors.Begin(); it != behaviors.End(); ++it) {
++        CKBehavior *beh = (CKBehavior *)*it;
++        if (!beh || beh->GetInputParameterCount() < 1) continue;
++        const char *name = beh->GetName();
++        if (!name || !strstr(name, "Load")) continue;
++        const char *data = (const char *)beh->GetInputParameterReadDataPtr(0);
++        const bool printable = data && (unsigned char)data[0] >= 0x20 && (unsigned char)data[0] < 0x7f;
++        log_line("debug: behavior \"%s\" param0 %s'%s'", name,
++                 printable ? "" : "(not a string) ",
++                 printable ? data : "");
++        if (++loads >= 12) break;
++    }
 +}
 +
 +// A key pressed and released inside one frame is invisible to IsKeyDown():
@@ -1674,6 +1768,9 @@ index 0000000..b36f972
 +    m_Header->Wheel = header.Wheel;
 +    m_Header->KeyE = header.KeyE;
 +    m_Header->KeyEsc = header.KeyEsc;
++    // M1c: the game's own level number, published in the same seqlock as the ball it
++    // belongs to -- a reader must never pair this frame's level with last frame's ball.
++    m_Header->LevelId = header.LevelId;
 +    // The sequence store is the publication barrier: everything above has to be
 +    // visible to a reader that acquires this value (see MpCamera.h).
 +#if defined(_WIN32)
@@ -2124,6 +2221,45 @@ index 0000000..b36f972
 +        }
 +    }
 +
++    // M1c (2026-11-08): which level this is, because nothing else can say.
++    //
++    // The Minecraft side used to identify the level from the ball's position -- "the
++    // level whose walkable floor passes closest under the ball" -- and that works for
++    // some starts and not others: levels 3, 5, 7, 9 and 11 put their start floor at
++    // the same place (measured 2026-11-08: all five scored 0.7 cells), so the vote
++    // ties and no level is loaded at all.
++    //
++    // CGameInfo::levelID would be the obvious source -- it is the number the in-game
++    // HUD prints -- except the shipped levels never fill it: measured 2026-11-08, it
++    // read 0 in level 1 (ball at 54, 16, -153) and 0 in level 3 (ball at the origin)
++    // while MPC_FLAG_LEVEL was up in both. What is certain is the file: every level is
++    // loaded by the "Object Load" behavior, whose resolved path ends in
++    // "3D Entities\Level\Level_03.nmo" in its first input parameter (see
++    // level_number_from_context).
++    //
++    // 0 = no level file seen: the reader treats that as "no answer" and falls back to
++    // the ball position, so an older Minecraft build still works.
++    header.LevelId = 0;
++    if (header.Flags & MPC_FLAG_LEVEL) {
++        // The scan walks every behavior, so twice a second is plenty: a level start
++        // gives the reader two seconds to see the number (LevelSession).
++        if ((m_Frame % 10) == 0) {
++            m_ScannedLevelId = level_number_from_context(context);
++        }
++        header.LevelId = (uint32_t)m_ScannedLevelId;
++    } else {
++        m_ScannedLevelId = 0;
++    }
++    if (env_flag("BALLANCE_MC_DEBUG_LEVEL") && (header.Flags & MPC_FLAG_LEVEL) &&
++        (m_Frame % 60) == 0) {
++        log_level_candidates(context);
++    }
++    if (header.LevelId != m_LastLevelId
++        || ((header.Flags & MPC_FLAG_LEVEL) && header.LevelId == 0 && (m_Frame % 240) == 0)) {
++        m_LastLevelId = header.LevelId;
++        log_line("level id %u", header.LevelId);
++    }
++
 +    header.TimeNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                        std::chrono::steady_clock::now().time_since_epoch())
 +                        .count();
@@ -2196,10 +2332,10 @@ index 0000000..b36f972
 +}
 diff --git a/src/MinecraftCameraSync.h b/src/MinecraftCameraSync.h
 new file mode 100644
-index 0000000..20a6b5b
+index 0000000..d0c4e55
 --- /dev/null
 +++ b/src/MinecraftCameraSync.h
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,182 @@
 +#ifndef PLAYER_MINECRAFTCAMERASYNC_H
 +#define PLAYER_MINECRAFTCAMERASYNC_H
 +
@@ -2352,6 +2488,12 @@ index 0000000..20a6b5b
 +
 +    float m_LogTimer = -1.0f;
 +    uint64_t m_Publishes = 0;
++    // Last LevelId published, so its arrival (and any change) is one log line rather
++    // than a guess: "level id 3" is the whole diagnosis.
++    uint32_t m_LastLevelId = 0;
++    // The level number found by the last scan of the "Object Load" behavior; 0 when
++    // the game has not loaded a level yet (or the map's file carries no number).
++    int m_ScannedLevelId = 0;
 +
 +    // Free view state. The two angles are the *view* direction, the same
 +    // convention the Steve rig's look uses (+X is to the right when looking
@@ -5272,10 +5414,10 @@ index 0000000..be2e7d5
 +#endif // PLAYER_MINECRAFTSTEVE_H
 diff --git a/src/MpCamera.h b/src/MpCamera.h
 new file mode 100644
-index 0000000..c731dc6
+index 0000000..fdcdc64
 --- /dev/null
 +++ b/src/MpCamera.h
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,147 @@
 +#ifndef MPCAMERA_H
 +#define MPCAMERA_H
 +
@@ -5322,13 +5464,18 @@ index 0000000..c731dc6
 +//     opened is still up (MpClientStatus.GuiOpen); that is what tells this side
 +//     to freeze the level and hand the pointer over.
 +//
++// M1c (2026-11-08) added the one field the Minecraft side could not work out for
++// itself: LevelId, the game's own level number. Identifying the level by where the
++// ball stood works only while the levels' start floors differ, and five of them do
++// not (see the field's own comment).
++//
 +// Keep in sync with tools/passthrough/mpcamera.h (the tools-side mirror) and with
 +// McCameraChannel.java (the reader, which hardcodes these offsets).
 +
 +#include <stdint.h>
 +
 +#define MPC_MAGIC 0x3143504Du // 'M''P''C''1' little endian
-+#define MPC_VERSION 2u
++#define MPC_VERSION 3u   // 3: LevelId (M1c)
 +#define MPC_BYTES 4096u
 +
 +// Flags
@@ -5373,7 +5520,23 @@ index 0000000..c731dc6
 +    int32_t Wheel;          // wheel notches accumulated since the writer started
 +    uint32_t KeyE;          // monotonic press counters; the reader keeps its own copy
 +    uint32_t KeyEsc;
-+    uint32_t Reserved[22];  // keeps the struct well inside MPC_BYTES
++    // --- M1c (2026-11-08): which level the game is in.
++    //
++    // The number in the file the level was loaded from -- "3D Entities\Level\
++    // Level_03.nmo" -- read out of the "Object Load" behavior that loaded it (see
++    // level_number_from_context in MinecraftCameraSync.cpp). Not CGameInfo::levelID,
++    // which looks like the right answer and is never written by the shipped levels
++    // (measured 2026-11-08: 0 in level 1 and in level 3, with the level flag up in
++    // both).
++    //
++    // The Minecraft side used to work the level out from where the ball stood, and
++    // that cannot work: levels 3, 5, 7, 9 and 11 share their start floor (all
++    // measured 0.7 cells), so the vote ties and no level is identified.
++    //
++    // 0 = "not known": menus, and the frames before a level file has been loaded.
++    // The reader treats 0 as "no answer" and falls back to the position.
++    uint32_t LevelId;
++    uint32_t Reserved[21];  // keeps the struct well inside MPC_BYTES
 +} MpCameraHeader;
 +
 +// Minecraft -> Ballance, at MPS_OFFSET in the same object. The camera channel
