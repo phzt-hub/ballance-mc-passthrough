@@ -42,6 +42,21 @@ public final class CameraSync {
      */
     static final double REACH_BLOCKS = 4.5;
 
+    /**
+     * How far above the ball the crosshair sits, in GUI pixels, per degree of the panel's aim
+     * lift (2026-11-08).
+     *
+     * <p>The panel row is still in degrees and is still the only control: 20 degrees -- the
+     * default -- is 66 GUI px, which is where the fixed-angle lift had been putting the crosshair
+     * on the 7.5-block camera the 2026-11-07 measurement was taken on. What changed is that the
+     * number is a distance on the screen now instead of an angle of rotation: one and the same 20
+     * degrees put the crosshair anywhere between 39 and 108 px above the ball over the 2026-11-08
+     * session (73 logged poses of level 9), because the camera stands anywhere between 6.7 and
+     * 18.7 blocks from the ball and, whenever it falls behind, the ball also drifts off the centre
+     * of the frame by up to 26 degrees.
+     */
+    private static final double GAP_PIXELS_PER_DEGREE = 3.3;
+
     private static volatile McCameraChannel.Pose framePose;
     private static boolean announced;
     private static boolean mirrorAnnounced;
@@ -83,13 +98,31 @@ public final class CameraSync {
         final double[] eye = McCameraMapper.toBlocks(pose.eye());
         final double[] ball = pose.hasBall() ? McCameraMapper.toBlocks(pose.ball()) : null;
         final float[] yawPitch = aim(McCameraMapper.yawPitch(pose.forward()), pose.aimLift());
+        // The rotation the tick will hand the player: solved from the player's own eye when
+        // there is one, so the log shows the aim the placement ray will use, not the camera's.
+        final Minecraft logClient = Minecraft.getInstance();
+        final double[] logEye = logClient.player == null
+                ? new double[]{eye[0], eye[1], eye[2]}
+                : new double[]{
+                        logClient.player.getX(),
+                        logClient.player.getY() + logClient.player.getEyeHeight(),
+                        logClient.player.getZ()};
+        final float[] solved = aimForCrosshair(pose,
+                logEye[0], logEye[1], logEye[2], guiWidth(), guiHeight());
+        String ballText = ball == null ? "(none)" : String.format("(%.2f, %.2f, %.2f)", ball[0], ball[1], ball[2]);
+        if (ball != null && guiWidth() > 0 && guiHeight() > 0) {
+            final double[] seen = new View(pose, guiWidth(), guiHeight()).project(ball);
+            if (seen != null) {
+                ballText = String.format("(%.2f, %.2f, %.2f) at=(%.1f, %.1f) gap=%.1fpx",
+                        ball[0], ball[1], ball[2], seen[0], seen[1], gapGui(pose.aimLift()));
+            }
+        }
         LOGGER.info(String.format(
                 "applied pose: eye=(%.2f, %.2f, %.2f) yaw=%.2f pitch=%.2f (lift %.2f)"
-                        + " fovH=%.2f -> fovV=%.2f aspect=%.3f frame=%dx%d ball=%s",
+                        + " fovH=%.2f -> fovV=%.2f aspect=%.3f frame=%dx%d ball=%s aim=(%.2f, %.2f)",
                 eye[0], eye[1], eye[2], yawPitch[0], yawPitch[1], Math.toDegrees(pose.aimLift()),
                 Math.toDegrees(pose.fovY()), Math.toDegrees(verticalFov(pose)), pose.aspect(),
-                frameWidth(), frameHeight(),
-                ball == null ? "(none)" : String.format("(%.2f, %.2f, %.2f)", ball[0], ball[1], ball[2])));
+                frameWidth(), frameHeight(), ballText, solved[0], solved[1]));
     }
 
     public static McCameraChannel.Pose framePose() {
@@ -166,22 +199,117 @@ public final class CameraSync {
     private static final float[] NO_OFFSET = {0.0f, 0.0f};
 
     /**
-     * Where the crosshair has to be drawn, in GUI pixels from the centre of the GUI, so that it
-     * sits on the block the current aim would place.
+     * The camera a frame is drawn from, with the projection that frame uses.
      *
-     * <p>This is what the panel's AimLift ends up as: the lift rotates the player's aim -- the
-     * rotation Minecraft starts the placement ray from -- and a block placed at the end of the
-     * reach is seen by the camera at an angle above its own axis. Drawing the crosshair on that
-     * point is what makes "aim here, the block appears there" true.
+     * <p>The same numbers {@code CameraMixin} installs: the eye through
+     * {@link McCameraMapper#toBlocks} (the mapping carries the Z mirror both worlds need), the
+     * channel's own forward and up, and the two half-angle tangents -- the horizontal one straight
+     * from the channel, the vertical one derived by {@link #verticalFov} because that is the axis
+     * Minecraft's projection spans.
+     */
+    private static final class View {
+        private final double[] eye;
+        private final double[] forward;
+        private final double[] right;
+        private final double[] up;
+        private final double tanHorizontal;
+        private final double tanVertical;
+        private final double halfWidth;
+        private final double halfHeight;
+
+        private View(McCameraChannel.Pose pose, int guiWidth, int guiHeight) {
+            eye = McCameraMapper.toBlocks(pose.eye());
+            forward = normalize(pose.forward()[0], pose.forward()[1], -pose.forward()[2]);
+            final double[] channelUp = normalize(pose.up()[0], pose.up()[1], -pose.up()[2]);
+            right = cross(forward, channelUp);
+            up = cross(right, forward);
+            tanHorizontal = Math.tan(pose.fovY() * 0.5);
+            tanVertical = Math.tan(verticalFov(pose) * 0.5);
+            halfWidth = Math.max(1.0, guiWidth * 0.5);
+            halfHeight = Math.max(1.0, guiHeight * 0.5);
+        }
+
+        /**
+         * Where this camera sees a point: GUI pixels from the centre, x to the right and y
+         * downwards, the signs {@code HudMixin} translates by. Null behind the camera.
+         */
+        private double[] project(double[] point) {
+            final double[] v = {point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]};
+            final double along = dot(v, forward);
+            if (along <= 1.0e-6) {
+                return null;
+            }
+            return new double[]{
+                    dot(v, right) / along / tanHorizontal * halfWidth,
+                    -dot(v, up) / along / tanVertical * halfHeight};
+        }
+
+        /** The direction through a GUI pixel offset from the centre, in the client's own space. */
+        private double[] through(double offsetX, double offsetY) {
+            final double side = offsetX / halfWidth * tanHorizontal;
+            final double above = -offsetY / halfHeight * tanVertical;
+            return normalize(
+                    forward[0] + right[0] * side + up[0] * above,
+                    forward[1] + right[1] * side + up[1] * above,
+                    forward[2] + right[2] * side + up[2] * above);
+        }
+    }
+
+    private static double[] normalize(double x, double y, double z) {
+        final double length = Math.sqrt(x * x + y * y + z * z);
+        if (length < 1.0e-9) {
+            return new double[]{0.0, 0.0, 1.0};
+        }
+        return new double[]{x / length, y / length, z / length};
+    }
+
+    private static double[] cross(double[] a, double[] b) {
+        return new double[]{
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0]};
+    }
+
+    private static double dot(double[] a, double[] b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    }
+
+    /** Minecraft yaw/pitch, in degrees, for a direction in the client's own space. */
+    private static float[] angles(double[] direction) {
+        final double horizontal = Math.sqrt(direction[0] * direction[0] + direction[2] * direction[2]);
+        return new float[]{
+                (float) Math.toDegrees(Math.atan2(-direction[0], direction[2])),
+                (float) Math.toDegrees(-Math.atan2(direction[1], horizontal))};
+    }
+
+    /** The crosshair's height above the ball in GUI pixels, for the panel's aim lift. */
+    private static float gapGui(float liftRadians) {
+        return (float) (Math.toDegrees(liftRadians) * GAP_PIXELS_PER_DEGREE);
+    }
+
+    private static int guiWidth() {
+        final Minecraft client = Minecraft.getInstance();
+        return client.getWindow() == null ? 0 : client.getWindow().getGuiScaledWidth();
+    }
+
+    private static int guiHeight() {
+        final Minecraft client = Minecraft.getInstance();
+        return client.getWindow() == null ? 0 : client.getWindow().getGuiScaledHeight();
+    }
+
+    /**
+     * Where the crosshair has to be drawn, in GUI pixels from the centre of the GUI: a fixed
+     * number of pixels above the ball, and still exactly on the point the placement ray lands on
+     * (2026-11-08).
      *
-     * <p>It used to be a vertical offset from the centre, computed from the angle between the aim
-     * and the camera axis. That is only correct while the ball is exactly at the centre of the
-     * frame, and it never followed the ball sideways at all. Ballance's camera lags the ball:
-     * measured on a 640x480 frame at level 1, the ball's projected position drifts up to 32 px
-     * horizontally and 34 px vertically while rolling, and a crosshair pinned to the centre stayed
-     * behind every time. Projecting the aim point through the same camera instead gives both
-     * axes: the point is anchored to the ball (the player stands on it), so the crosshair drifts
-     * with the ball, and it is still exactly where the block will appear.
+     * <p>Since 2026-11-07 this projected the aim point -- the ball, plus the eye height, plus the
+     * reach along the aim -- through the camera. That made the crosshair the landing point by
+     * construction, but the distance from it to the ball was whatever the camera's distance and
+     * its lag happened to make it: measured 39..108 GUI px over one session, for one and the same
+     * aim lift, which is what "the crosshair does not follow the ball" looked like. It now
+     * projects the ball itself and lifts the result by {@link #gapGui}, so the two are a fixed
+     * distance apart, and the aim is solved to match (see {@link #aimForCrosshair}) so that the
+     * block still lands under the crosshair.
      *
      * <p>Returns {0, 0} when there is no pose yet, so the stock crosshair is left alone.
      */
@@ -197,49 +325,93 @@ public final class CameraSync {
         if (client.player == null) {
             return NO_OFFSET;
         }
-        final float[] yawPitch = aim(McCameraMapper.yawPitch(pose.forward()), pose.aimLift());
+        if (!pose.hasBall()) {
+            // Nothing to hold the crosshair against: fall back to the aim point itself.
+            return aimPointOffset(pose, guiWidth, guiHeight);
+        }
+        final View view = new View(pose, guiWidth, guiHeight);
+        final double[] ball = view.project(McCameraMapper.toBlocks(pose.ball()));
+        if (ball == null) {
+            return NO_OFFSET;
+        }
+        return new float[]{(float) ball[0], (float) (ball[1] - gapGui(pose.aimLift()))};
+    }
+
+    /**
+     * Where the placement ray lands, in GUI pixels from the centre -- the projection this used
+     * before the crosshair was pinned to the ball, kept for the frames that carry no ball.
+     */
+    private static float[] aimPointOffset(McCameraChannel.Pose pose, int guiWidth, int guiHeight) {
+        final Minecraft client = Minecraft.getInstance();
+        if (client.player == null) {
+            return NO_OFFSET;
+        }
+        final View view = new View(pose, guiWidth, guiHeight);
+        final float[] yawPitch = aimForCrosshair(pose,
+                client.player.getX(), client.player.getY() + client.player.getEyeHeight(),
+                client.player.getZ(), guiWidth, guiHeight);
         final double yaw = Math.toRadians(yawPitch[0]);
         final double pitch = Math.toRadians(yawPitch[1]);
         final double cosPitch = Math.cos(pitch);
-        final double aimX = -Math.sin(yaw) * cosPitch;
-        final double aimY = -Math.sin(pitch);
-        final double aimZ = Math.cos(yaw) * cosPitch;
-
-        // The block goes at the end of the reach, measured from the player's eye:
-        // that is where Minecraft starts its placement ray.
         final double eyeX = client.player.getX();
         final double eyeY = client.player.getY() + client.player.getEyeHeight();
         final double eyeZ = client.player.getZ();
-        final double blockX = eyeX + aimX * REACH_BLOCKS;
-        final double blockY = eyeY + aimY * REACH_BLOCKS;
-        final double blockZ = eyeZ + aimZ * REACH_BLOCKS;
-
-        // ... and the camera sees that point at an angle off its own axis, in both axes.
-        final double[] eye = McCameraMapper.toBlocks(pose.eye());
-        final double[] forward = {pose.forward()[0], pose.forward()[1], -pose.forward()[2]};
-        final double[] up = {pose.up()[0], pose.up()[1], -pose.up()[2]};
-        final double rightX = forward[1] * up[2] - forward[2] * up[1];
-        final double rightY = forward[2] * up[0] - forward[0] * up[2];
-        final double rightZ = forward[0] * up[1] - forward[1] * up[0];
-        final double vx = blockX - eye[0];
-        final double vy = blockY - eye[1];
-        final double vz = blockZ - eye[2];
-        final double along = vx * forward[0] + vy * forward[1] + vz * forward[2];
-        if (along <= 1.0e-6) {
+        final double[] landing = {
+                eyeX + -Math.sin(yaw) * cosPitch * REACH_BLOCKS,
+                eyeY + -Math.sin(pitch) * REACH_BLOCKS,
+                eyeZ + Math.cos(yaw) * cosPitch * REACH_BLOCKS};
+        final double[] seen = view.project(landing);
+        if (seen == null) {
             return NO_OFFSET;
         }
-        final double side = vx * rightX + vy * rightY + vz * rightZ;
-        final double above = vx * up[0] + vy * up[1] + vz * up[2];
+        return new float[]{(float) seen[0], (float) seen[1]};
+    }
 
-        // Both half-angles, each one in the axis it belongs to: the channel's number spans the
-        // width (see verticalFov), while Minecraft's projection spans the height and lets the
-        // aspect produce the horizontal one.
-        final double tanHorizontal = Math.tan(pose.fovY() * 0.5);
-        final double tanVertical = Math.tan(verticalFov(pose) * 0.5);
-        final double ndcX = (side / along) / tanHorizontal;
-        final double ndcY = (above / along) / tanVertical;
-        // Screen x grows to the right and GUI y grows downwards, the opposite of NDC's y.
-        return new float[]{(float) (ndcX * guiWidth * 0.5), (float) (-ndcY * guiHeight * 0.5)};
+    /**
+     * The rotation the player has to carry so that the placement ray lands a fixed
+     * {@link #gapGui} pixels above the ball's own projected position (2026-11-08).
+     *
+     * <p>Why solve at all: an angle of lift is a rotation, and how many pixels it moves the
+     * crosshair depends on how far the camera stands -- a far camera shrinks it, and a camera that
+     * has fallen behind the ball puts the ball off the centre as well, so the same lift drew the
+     * crosshair anywhere between 39 and 108 px above the ball in one session.
+     *
+     * <p>The solve is exact, not iterative. The landing point has to satisfy two things: it lies
+     * on the camera's ray through the crosshair (so the crosshair is drawn on it), and it is
+     * exactly {@link #REACH_BLOCKS} from the player's eye (so the ray that starts there lands on
+     * it). The second is a sphere around the eye, so the point is where that ray meets the
+     * sphere -- a quadratic. The far crossing is the one wanted: it is the one in front of the
+     * ball, the near one would put the block between the ball and the camera.
+     */
+    public static float[] aimForCrosshair(McCameraChannel.Pose pose,
+            double eyeX, double eyeY, double eyeZ, int guiWidth, int guiHeight) {
+        final float[] fallback = aim(McCameraMapper.yawPitch(pose.forward()), pose.aimLift());
+        if (guiWidth <= 0 || guiHeight <= 0 || pose.fovY() <= 0.0f || !pose.hasBall()) {
+            return fallback;
+        }
+        final View view = new View(pose, guiWidth, guiHeight);
+        final double[] ball = view.project(McCameraMapper.toBlocks(pose.ball()));
+        if (ball == null) {
+            return fallback;
+        }
+        final double[] ray = view.through(ball[0], ball[1] - gapGui(pose.aimLift()));
+        final double[] fromEye = {view.eye[0] - eyeX, view.eye[1] - eyeY, view.eye[2] - eyeZ};
+        final double b = dot(fromEye, ray);
+        final double c = dot(fromEye, fromEye) - REACH_BLOCKS * REACH_BLOCKS;
+        final double discriminant = b * b - c;
+        if (discriminant < 0.0) {
+            // The pixel is further from the eye than the reach can go -- a camera that has fallen
+            // a long way off. Keep the old fixed-angle lift rather than aim at nothing.
+            return fallback;
+        }
+        final double t = -b + Math.sqrt(discriminant);
+        if (!(t > 0.0)) {
+            return fallback;
+        }
+        return angles(normalize(
+                view.eye[0] + ray[0] * t - eyeX,
+                view.eye[1] + ray[1] * t - eyeY,
+                view.eye[2] + ray[2] * t - eyeZ));
     }
 
     /**
@@ -295,11 +467,11 @@ public final class CameraSync {
         }
 
         player.snapTo(x, y, z);
-        // The same angles the camera is installed with, aim lift included: the
-        // block interaction ray starts at the player's eye along its rotation, so
-        // a lift the camera took and the player did not would put the block
-        // somewhere other than the crosshair.
-        final float[] yawPitch = aim(McCameraMapper.yawPitch(pose.forward()), pose.aimLift());
+        // The angles solved for the crosshair, not the camera's own: the block interaction ray
+        // starts at the player's eye along this rotation, so this is what makes the block land
+        // under the crosshair instead of wherever a fixed lift happened to point.
+        final float[] yawPitch = aimForCrosshair(pose, x, y + player.getEyeHeight(), z,
+                guiWidth(), guiHeight());
         player.setYRot(yawPitch[0]);
         player.setXRot(yawPitch[1]);
         player.setOldPosAndRot();

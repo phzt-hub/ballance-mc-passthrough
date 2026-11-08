@@ -19,9 +19,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * Ballance in its own frame. The crosshair used to be pinned to the centre of this frame (plus a
  * vertical lift), which is only the same place as the ball while the ball happens to be centred:
  * Ballance's camera lags the ball, so the ball drifts by tens of pixels while rolling and the
- * crosshair stayed behind. {@link CameraSync#crosshairOffsetGui} now projects the aim point -- the
- * point the placement ray lands on, anchored to the ball -- through the camera, so the crosshair
- * follows the ball in both axes and still marks where a block would appear.
+ * crosshair stayed behind. Since 2026-11-07 it is anchored to the ball; since 2026-11-08 it is
+ * anchored a fixed number of pixels above it -- {@link CameraSync#crosshairOffsetGui} projects the
+ * ball and lifts the result -- and the player's rotation is solved to put the block on exactly that
+ * pixel ({@link CameraSync#aimForCrosshair}), so the block still appears under the crosshair.
  *
  * <p>Done as a translation around the extraction of the crosshair only: the rest of the HUD (the
  * hotbar, the hand, any overlay) stays exactly where Minecraft puts it.
