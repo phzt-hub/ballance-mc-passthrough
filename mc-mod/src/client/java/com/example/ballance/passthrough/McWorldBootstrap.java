@@ -166,6 +166,7 @@ public final class McWorldBootstrap {
      */
     public static String createFreshWorld(Minecraft client) {
         final String id = nextWorldId(client);
+        removeEmptyLeftover(client, id);
         LOGGER.info("creating fresh void world \"{}\"", id);
         passthroughWorld = true;
         currentWorldId = id;
@@ -184,7 +185,10 @@ public final class McWorldBootstrap {
         final LevelStorageSource source = client.getLevelSource();
         for (int n = 1; n <= 999; n++) {
             final String id = n == 1 ? BASE_WORLD : BASE_WORLD + "-" + n;
-            if (!Files.exists(source.getLevelPath(id))) {
+            final Path path = source.getLevelPath(id);
+            // A directory with no level.dat in it holds no world (a half-unpacked template used to
+            // leave one behind), so its id is free and gets rewritten rather than skipped.
+            if (!Files.exists(path) || !Files.isRegularFile(path.resolve("level.dat"))) {
                 return id;
             }
         }
@@ -240,15 +244,17 @@ public final class McWorldBootstrap {
     public static boolean openLevelWorld(Minecraft client, int levelId) {
         final String template = String.format("Level_%02d", levelId);
         if (levelId < 1 || !hasTemplate(template)) {
+            LOGGER.warn("no baked world for level {}; a plain void world is used instead", levelId);
             createFreshWorld(client);
             return false;
         }
         final String id = nextWorldId(client);
         try {
-            final int files = extractTemplate(client, template, id);
+            final int files = installTemplate(client, template, id);
             LOGGER.info("opening the baked world for {} as \"{}\" ({} files)", template, id, files);
         } catch (IOException | RuntimeException error) {
-            LOGGER.warn("could not unpack the baked world {}: {}", template, error.toString());
+            LOGGER.error("could not unpack the baked world {}: {} -- a plain void world is used instead",
+                    template, error.toString(), error);
             createFreshWorld(client);
             return false;
         }
@@ -268,35 +274,145 @@ public final class McWorldBootstrap {
     }
 
     private static boolean hasTemplate(String name) {
+        if (ownJarEntry("assets/ballance/templates/" + name + ".zip") != null) {
+            return true;
+        }
         return McWorldBootstrap.class.getResource("/assets/ballance/templates/" + name + ".zip") != null;
     }
 
-    /** Unpacks one template zip into saves/<id>. */
-    private static int extractTemplate(Minecraft client, String name, String id) throws IOException {
-        final Path dir = client.getLevelSource().getLevelPath(id);
-        Files.createDirectories(dir);
-        int files = 0;
-        try (java.io.InputStream raw = McWorldBootstrap.class.getResourceAsStream(
-                "/assets/ballance/templates/" + name + ".zip")) {
-            if (raw == null) {
-                throw new IOException("no " + name + ".zip in the mod");
+    /**
+     * The mod's own file when it was loaded from a jar, null in a development run (the classes
+     * come from a directory there, and only the class loader knows about the resources).
+     */
+    private static Path ownJar() {
+        try {
+            final java.security.CodeSource code = McWorldBootstrap.class.getProtectionDomain().getCodeSource();
+            if (code == null || code.getLocation() == null) {
+                return null;
             }
-            try (java.util.zip.ZipInputStream zip = new java.util.zip.ZipInputStream(raw)) {
-                java.util.zip.ZipEntry entry;
-                while ((entry = zip.getNextEntry()) != null) {
-                    final Path target = dir.resolve(entry.getName()).normalize();
-                    if (!target.startsWith(dir)) {
-                        continue;   // zip slip
+            final Path self = java.nio.file.Paths.get(code.getLocation().toURI());
+            return Files.isRegularFile(self) ? self : null;
+        } catch (Throwable throwable) {
+            LOGGER.warn("could not locate the mod file: {}", throwable.toString());
+            return null;
+        }
+    }
+
+    private static java.util.zip.ZipEntry ownJarEntry(String entry) {
+        final Path self = ownJar();
+        if (self == null) {
+            return null;
+        }
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(self.toFile())) {
+            return zip.getEntry(entry);
+        } catch (IOException exception) {
+            LOGGER.warn("could not read the mod file {}: {}", self, exception.toString());
+            return null;
+        }
+    }
+
+    /**
+     * Unpacks one template zip into {@code saves/<id>}, through a staging directory.
+     *
+     * <p>2026-11-08, first packaged run: the log said {@code (0 files)} and the world then failed
+     * to load with {@code NoSuchFileException: level.dat}. The class loader had handed back a
+     * stream with no entries in it and nothing threw, so the save the mod left behind was an
+     * empty directory -- and {@code openWorld} went straight into it. Three changes, all of them
+     * about "fail where it can be seen":
+     * <ul>
+     *   <li>the bytes are copied out of the mod's own jar file first ({@link #ownJar()}); the
+     *       class loader is only the fallback for a development run;</li>
+     *   <li>the zip is read with {@link java.util.zip.ZipFile} instead of a stream, so a template
+     *       that is not a zip says so;</li>
+     *   <li>everything is unpacked into a staging directory and only moved into {@code saves/}
+     *       once {@code level.dat} is really there.</li>
+     * </ul>
+     */
+    private static int installTemplate(Minecraft client, String name, String id) throws IOException {
+        final Path saves = client.getLevelSource().getLevelPath(id).getParent();
+        final Path target = client.getLevelSource().getLevelPath(id);
+        final Path work = saves.getParent().resolve(".bmc-template-work");
+        Files.createDirectories(work);
+        final Path stash = work.resolve(name + ".zip");
+        final Path staging = work.resolve(name);
+        deleteRecursively(staging);
+        Files.createDirectories(staging);
+
+        final long bytes = stashTemplate(name, stash);
+        if (bytes < 4) {
+            throw new IOException("the template for " + name + " is empty (" + bytes + " bytes)");
+        }
+        int files;
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(stash.toFile())) {
+            files = unzipTemplate(zip, staging);
+        }
+        if (!Files.isRegularFile(staging.resolve("level.dat"))) {
+            throw new IOException("the template for " + name + " has no level.dat ("
+                    + files + " files unpacked out of " + bytes + " bytes)");
+        }
+        if (Files.exists(target)) {
+            deleteRecursively(target);
+        }
+        Files.move(staging, target);
+        Files.deleteIfExists(stash);
+        return files;
+    }
+
+    /** Copies the template zip out of the mod into {@code stash}; returns the byte count. */
+    private static long stashTemplate(String name, Path stash) throws IOException {
+        final String entry = "assets/ballance/templates/" + name + ".zip";
+        final Path self = ownJar();
+        if (self != null) {
+            try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(self.toFile())) {
+                final java.util.zip.ZipEntry found = zip.getEntry(entry);
+                if (found != null) {
+                    try (java.io.InputStream in = zip.getInputStream(found)) {
+                        final long bytes = Files.copy(in, stash,
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        LOGGER.info("template {} read from the mod file {} ({} bytes)",
+                                name, self.getFileName(), bytes);
+                        return bytes;
                     }
-                    if (entry.isDirectory()) {
-                        Files.createDirectories(target);
-                        continue;
-                    }
-                    Files.createDirectories(target.getParent());
-                    Files.copy(zip, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    ++files;
                 }
+                LOGGER.warn("the mod file {} has no {}", self.getFileName(), entry);
             }
+        }
+        try (java.io.InputStream in = McWorldBootstrap.class.getResourceAsStream("/" + entry)) {
+            if (in == null) {
+                throw new IOException("the mod carries no " + entry);
+            }
+            final long bytes = Files.copy(in, stash, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            LOGGER.info("template {} read through the class loader ({} bytes, {})",
+                    name, bytes, in.getClass().getName());
+            return bytes;
+        }
+    }
+
+    /** Unpacks every file of the template into {@code dir} and returns how many were written. */
+    private static int unzipTemplate(java.util.zip.ZipFile zip, Path dir) throws IOException {
+        int files = 0;
+        int refused = 0;
+        final java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = zip.entries();
+        while (entries.hasMoreElements()) {
+            final java.util.zip.ZipEntry entry = entries.nextElement();
+            final Path target = dir.resolve(entry.getName()).normalize();
+            if (!target.startsWith(dir)) {
+                ++refused;
+                continue;
+            }
+            if (entry.isDirectory()) {
+                Files.createDirectories(target);
+                continue;
+            }
+            Files.createDirectories(target.getParent());
+            try (java.io.InputStream in = zip.getInputStream(entry)) {
+                Files.copy(in, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            ++files;
+        }
+        if (refused > 0) {
+            LOGGER.warn("refused {} template entr{} with an absolute or parent-relative path",
+                    refused, refused == 1 ? "y" : "ies");
         }
         return files;
     }
@@ -340,8 +456,14 @@ public final class McWorldBootstrap {
         try (Stream<Path> entries = Files.list(saves)) {
             for (Path path : entries.toList()) {
                 final String name = path.getFileName().toString();
-                if (Files.isDirectory(path) && isOwnWorld(name) && !name.equals(currentWorldId)
-                        && archiveWorld(client, name)) {
+                if (!Files.isDirectory(path) || !isOwnWorld(name) || name.equals(currentWorldId)) {
+                    continue;
+                }
+                if (!Files.isRegularFile(path.resolve("level.dat"))) {
+                    removeEmptyLeftover(client, name);
+                    continue;
+                }
+                if (archiveWorld(client, name)) {
                     ++archived;
                 }
             }
@@ -394,7 +516,28 @@ public final class McWorldBootstrap {
         }
     }
 
+    /**
+     * Drops a save directory that holds no world: {@code openWorld} on one of those is what put
+     * the "加载世界失败 / NoSuchFileException: level.dat" screen in front of the user on
+     * 2026-11-08, so the leftovers are removed before they can be opened.
+     */
+    private static void removeEmptyLeftover(Minecraft client, String id) {
+        final Path path = client.getLevelSource().getLevelPath(id);
+        if (!Files.isDirectory(path) || Files.isRegularFile(path.resolve("level.dat"))) {
+            return;
+        }
+        try {
+            deleteRecursively(path);
+            LOGGER.info("removed the empty leftover \"{}\" (no level.dat)", id);
+        } catch (IOException exception) {
+            LOGGER.warn("could not remove the empty leftover \"{}\": {}", id, exception.toString());
+        }
+    }
+
     private static void deleteRecursively(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            return;
+        }
         try (Stream<Path> files = Files.walk(path)) {
             for (Path each : files.sorted(Comparator.reverseOrder()).toList()) {
                 Files.deleteIfExists(each);

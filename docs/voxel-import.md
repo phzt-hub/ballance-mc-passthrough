@@ -114,9 +114,15 @@ BALLANCE_MC_LEVEL=<n> 可以强制指定，给测试用。
   然后 saveEverything(flush)，日志打 BAKE DONE；烘好的世界压成 Level_NN.zip 放进 mod 资源。
 * **进关卡**：LevelSession 认出关卡 → McWorldBootstrap.openLevelWorld 把模板解到 saves/<实例> → openWorld。
   世界一打开就是完整的一关；模板缺失时退回「建虚空世界 + 现铺」。
+* **解包怎么走**（2026-11-08 12:00 改）：字节**先从 mod 自己的 jar 文件里读**（ownJar() 拿 CodeSource 位置，
+  ZipFile 取条目），类加载器只作开发环境（exploded classes）的退路；解到 <游戏目录>/.bmc-template-work/Level_NN，
+  确认 level.dat 真在、再看一眼字节数，才 Files.move 进 saves/<实例>。任何一步不对就抛异常，
+  退回虚空世界并打 ERROR —— 不会再留一个没有 level.dat 的空存档让世界列表去打开它。
 * **实例与留档**：每次重进关卡都是新实例；被换下来的那份**不删**，改名成 <id>-<yyyyMMdd-HHmmss>
   留在 saves/ 里（例如 passthrough-2-20261108-113012）。日志写 archived … (N instances kept)，
   超过 20 份追加一句提醒。上次会话没来得及留档的那份，启动时也会改名留档，不会删。
+  **没有 level.dat 的目录不算实例**：启动时直接删（removed the empty leftover …），
+  取 id 时也当它是空的、原地重写 —— 2026-11-08 那次失败留下的正是这种目录。
 
 ## 七、实测（2026-11-08，Linux / Xvfb / llvmpipe）
 
@@ -125,6 +131,7 @@ BALLANCE_MC_LEVEL=<n> 可以强制指定，给测试用。
 ~~~
 level start: level 1 ball at (54.1, 16.0, -153.0) -> mapping anchor=(0.0, 100.0, 0.0) origin=(0.0, 0.0, 0.0)
 level start: replacing the world (previous save "passthrough")
+template Level_01 read through the class loader (985240 bytes, ...)   <- 开发环境走这条
 opening the baked world for Level_01 as "passthrough-2" (30 files)
 world ready: "passthrough-2" (previous save "passthrough")
 voxels: under the ball at BlockPos{x=9, y=102, z=27} is Block{minecraft:barrier}[waterlogged=false]
@@ -169,6 +176,14 @@ voxels: vanilla right-click test on a barrier -> Success[swingSource=PREDICTED, 
 5. **未加载的区块**：平时铺块跳过没加载的区块（球跑到哪铺到哪），烘模板必须强制生成。
 6. **pkill -f 会杀掉自己**：写在一行 bash 里时，模式串也出现在父 shell 的命令行里。
    脚本里用 [n]et.fabricmc… 这种括号写法。
+7. **打包后的 jar 里，类加载器给的模板流是空的**（2026-11-08 首次真机）。开发环境解出 30 个文件，
+   128 上同一份代码打的是 (0 files)：不抛异常、循环一次都没进，目录建了、level.dat 没有，
+   紧接着 openWorld 撞上 NoSuchFileException: level.dat，客户端停在「加载世界失败 / 尝试恢复」。
+   同一台机器、同一个 jar、同一份 JDK 25 用 URLClassLoader + getResourceAsStream 读出来是 30 条，
+   所以问题在「谁来读」而不在文件。现在的做法不再依赖那条流：直接按 CodeSource 打开 mod 自己的 jar，
+   ZipFile 取条目；并且解包先进暂存目录、验过 level.dat 才搬进 saves/。
+   **判据**：日志里出现 template Level_NN read from the mod file … 才算走了新路；
+   出现 could not unpack the baked world … 说明退回了虚空世界（能玩，但方块是现铺的）。
 
 ## 九、常用命令
 
