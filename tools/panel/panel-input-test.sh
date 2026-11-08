@@ -104,6 +104,11 @@ def ini_text():
     return open(INI, encoding="utf-8", errors="replace").read() if os.path.exists(INI) else ""
 
 
+def ini_key(name):
+    match = re.search(r"^%s=.*$" % name, ini_text(), re.M)
+    return match.group(0) if match else "<no %s key>" % name
+
+
 def centre(rect):
     return ((rect[0] + rect[2]) * 0.5, (rect[1] + rect[3]) * 0.5)
 
@@ -162,16 +167,20 @@ origin = (wx, wy)
 print("== clicks ==")
 click(origin, *centre(rows[0][2]), "row 0 (Steve) -> off")
 click(origin, *centre(rows[0][2]), "row 0 (Steve) -> on")
-click(origin, *centre(rows[4][2]), "row 4 (HideBall) -> on")
-click(origin, *centre(boxes[5]["plus"]), "row 5 (Scale) plus")
-click(origin, *centre(boxes[5]["minus"]), "row 5 (Scale) minus")
+click(origin, *centre(rows[3][2]), "row 3 (HideBall) -> on")
+click(origin, *centre(boxes[4]["plus"]), "row 4 (Scale) plus")
+click(origin, *centre(boxes[4]["minus"]), "row 4 (Scale) minus")
+# The block size is the newest row: it has to draw, hit, step and persist like
+# the ones that were there before it.
+click(origin, *centre(boxes[7]["plus"]), "row 7 (Block) plus")
+print("   ini now: %s" % ini_key("Block"))
+click(origin, *centre(boxes[7]["minus"]), "row 7 (Block) minus")
+print("   ini now: %s" % ini_key("Block"))
 click(origin, panel[0] + 3, (rows[1][2][1] + rows[1][2][3]) * 0.5, "panel edge, expected miss")
-click(origin, *centre(rows[7][2]), "row 7 (Debug) -> on")
-print("   ini now: %s" % (re.search(r"^Debug=.*$", ini_text(), re.M).group(0)
-                         if re.search(r"^Debug=.*$", ini_text(), re.M) else "<no Debug key>"))
-click(origin, *centre(rows[7][2]), "row 7 (Debug) -> off")
-print("   ini now: %s" % (re.search(r"^Debug=.*$", ini_text(), re.M).group(0)
-                         if re.search(r"^Debug=.*$", ini_text(), re.M) else "<no Debug key>"))
+click(origin, *centre(rows[8][2]), "row 8 (Debug) -> on")
+print("   ini now: %s" % ini_key("Debug"))
+click(origin, *centre(rows[8][2]), "row 8 (Debug) -> off")
+print("   ini now: %s" % ini_key("Debug"))
 click(origin, *centre(reset), "Restore defaults")
 
 print("== keyboard ==")

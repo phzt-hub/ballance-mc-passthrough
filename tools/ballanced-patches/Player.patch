@@ -1245,7 +1245,7 @@ index 3b54c38..5526b84 100644
  #endif /* PLAYER_GAMEPLAYER_H */
 diff --git a/src/MinecraftCameraSync.cpp b/src/MinecraftCameraSync.cpp
 new file mode 100644
-index 0000000..4292b1e
+index 0000000..e1a8924
 --- /dev/null
 +++ b/src/MinecraftCameraSync.cpp
 @@ -0,0 +1,673 @@
@@ -1772,13 +1772,13 @@ index 0000000..4292b1e
 +    header.Version = MPC_VERSION;
 +    header.Width = (uint32_t)renderContext->GetWidth();
 +    header.Height = (uint32_t)renderContext->GetHeight();
-+    // The scale the passthrough draws with: one Minecraft block is four Ballance units, i.e.
-+    // exactly one ball across (docs/scale-calibration.md: Ball_Wood is 4.00 x 4.00 x 4.00 u).
-+    // 5.0 was tried as a fudge because blocks looked small, but blocks looking small was never
-+    // a world-scale problem: it was the FOV handed to the Minecraft side being Ballance's
-+    // horizontal one fed in as a vertical one (see CameraSync.verticalFov). With that fixed the
-+    // honest 4.0 is also the one that looks right.
-+    header.UnitsPerBlock = 4.0f;
++    // The size a block is drawn at, in Ballance units. It is a setting (panel row Block, ini
++    // key Block, BALLANCE_MC_BLOCK) because the calibration table's honest number is not the
++    // number the eye accepts: 4.0 u is one ball across, but a block laid beside a ball
++    // transformer has to be the transformer's size, and P_Trafo_* measures 5.48 x 5.48 u.
++    // The FOV mix-up that once made 4.0 look wrong is fixed in CameraSync.verticalFov, so this
++    // number is now only about block size, not about projection.
++    header.UnitsPerBlock = m_Settings ? m_Settings->GetFloat(eMcBlock) : 5.48f;
 +    header.Frame = m_Frame;
 +
 +    // The attached camera is what the scene draws from, and its transform is
@@ -3058,10 +3058,10 @@ index 0000000..5dd57ac
 +#endif // PLAYER_MINECRAFTOVERLAY_H
 diff --git a/src/MinecraftSettings.cpp b/src/MinecraftSettings.cpp
 new file mode 100644
-index 0000000..04086c0
+index 0000000..cbad003
 --- /dev/null
 +++ b/src/MinecraftSettings.cpp
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,315 @@
 +#include "MinecraftSettings.h"
 +
 +#include <math.h>
@@ -3103,6 +3103,10 @@ index 0000000..04086c0
 +    {"AimLift", "BALLANCE_MC_AIM_LIFT", "Aim lift (degrees)", false, 1.0f, 0.0f, 30.0f,
 +     "; Degrees the Minecraft camera is tilted up over the Ballance view direction.\n"
 +     "; 0 puts the crosshair exactly on the ball (blocks land on it); 8 lifts it clear.\n"},
++    {"Block", "BALLANCE_MC_BLOCK", "Block size (units)", false, 0.05f, 2.0f, 8.0f,
++     "; Ballance units one Minecraft block is drawn across. 5.48 is the ball\n"
++     "; transformer's plate (P_Trafo_* measures 5.48 x 5.48 u), so a block beside a\n"
++     "; transformer is exactly its size; 4.0 is one ball across.\n"},
 +    {"Debug", "BALLANCE_MC_STEVE_DEBUG", "Debug log", true, 0.0f, 0.0f, 0.0f,
 +     "; Once a second, log where Steve is and what the gate decided.\n"},
 +};
@@ -3190,6 +3194,11 @@ index 0000000..04086c0
 +    // centre -- clear of it. The row steps by one degree if a different
 +    // separation is wanted.
 +    values.aimLift = 20.0f;
++    // 5.48 units: the ball transformer's plate. The ball is 4.0 across, so at this
++    // scale it is 0.73 of a block -- that is what makes a block and a transformer
++    // read as one size (measured on the 2026-11-08 1280x960 shot: drawn at 4.0 the
++    // plate came out 1.39 times the block).
++    values.blockUnits = 5.48f;
 +    return values;
 +}
 +
@@ -3268,6 +3277,7 @@ index 0000000..04086c0
 +        case eMcScale: return m_Values.scale;
 +        case eMcSensitivity: return m_Values.sensitivity;
 +        case eMcAimLift: return m_Values.aimLift;
++        case eMcBlock: return m_Values.blockUnits;
 +        default: return 0.0f;
 +    }
 +}
@@ -3282,6 +3292,7 @@ index 0000000..04086c0
 +        case eMcScale: m_Values.scale = value; break;
 +        case eMcSensitivity: m_Values.sensitivity = value; break;
 +        case eMcAimLift: m_Values.aimLift = value; break;
++        case eMcBlock: m_Values.blockUnits = value; break;
 +        default: break;
 +    }
 +}
@@ -3368,10 +3379,10 @@ index 0000000..04086c0
 +}
 diff --git a/src/MinecraftSettings.h b/src/MinecraftSettings.h
 new file mode 100644
-index 0000000..b53f6f4
+index 0000000..527d91c
 --- /dev/null
 +++ b/src/MinecraftSettings.h
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,102 @@
 +#ifndef PLAYER_MINECRAFTSETTINGS_H
 +#define PLAYER_MINECRAFTSETTINGS_H
 +
@@ -3389,6 +3400,7 @@ index 0000000..b53f6f4
 +    eMcScale,       // Scale=0.25        Ballance units per model unit
 +    eMcSensitivity, // Sensitivity=0.0025 radians of yaw/pitch per mouse pixel
 +    eMcAimLift,     // AimLift=8         degrees the Minecraft camera is tilted up over the view
++    eMcBlock,       // Block=5.48        Ballance units one Minecraft block is drawn across
 +    eMcDebugLog,    // Debug=0           once a second, log what Steve is doing
 +    eMcRowCount
 +};
@@ -3423,6 +3435,11 @@ index 0000000..b53f6f4
 +        // lands on it; this moves the crosshair off the ball without moving the
 +        // Ballance frame. See MpCamera.h (AimLift).
 +        float aimLift;
++        // Ballance units one Minecraft block is drawn across. The calibration
++        // table's honest number (4.0, one ball) is not what the eye accepts: a
++        // block laid beside a ball transformer has to be the transformer's size,
++        // and P_Trafo_* measures 5.48 x 5.48 u.
++        float blockUnits;
 +    };
 +
 +    CMinecraftSettings();
@@ -4935,10 +4952,10 @@ index 0000000..be2e7d5
 +#endif // PLAYER_MINECRAFTSTEVE_H
 diff --git a/src/MpCamera.h b/src/MpCamera.h
 new file mode 100644
-index 0000000..db17763
+index 0000000..c731dc6
 --- /dev/null
 +++ b/src/MpCamera.h
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,126 @@
 +#ifndef MPCAMERA_H
 +#define MPCAMERA_H
 +
@@ -4964,8 +4981,9 @@ index 0000000..db17763
 +//
 +// Coordinates are Ballance world units (Virtools, row vectors, left handed,
 +// +Z forward, +Y up). Converting to Minecraft blocks is the reader's job;
-+// UnitsPerBlock says how many units make one block (docs/scale-calibration.md measured
-+// the ball at 4.0 u across; the passthrough uses 5.0, i.e. the ball is 0.8 of a block).
++// UnitsPerBlock says how many units make one block. It defaults to 5.48, the width of a
++// ball transformer's plate (P_Trafo_* in docs/scale-calibration.md), so a block is the same
++// size as the transformer; 4.0 is the honest calibration (one ball across).
 +//
 +// M1b (2026-11-06) added two things to the same object, both in the space the
 +// version-1 payload left as Reserved:
@@ -5022,7 +5040,8 @@ index 0000000..db17763
 +    float Near;             // front plane, units
 +    float Far;              // back plane, units
 +    float Ball[3];          // player ball centre, units
-+    float UnitsPerBlock;    // 5.0 = one block, drawn scale (the ball is 4.0 u across)
++    float UnitsPerBlock;    // units across one drawn block: 5.48 = a transformer plate,
++                            // 4.0 = one ball (the panel row Block steps it)
 +    uint32_t Frame;         // Ballance frame counter
 +    uint64_t TimeNs;        // CLOCK_MONOTONIC of the publish
 +    // --- M1b. These sit where version 1 had Reserved[0..], so every offset

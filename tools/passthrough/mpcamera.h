@@ -23,8 +23,9 @@
 //
 // Coordinates are Ballance world units (Virtools, row vectors, left handed,
 // +Z forward, +Y up). Converting to Minecraft blocks is the reader's job;
-// UnitsPerBlock says how many units make one block (docs/scale-calibration.md:
-// 4.0, i.e. the ball is one block across).
+// UnitsPerBlock says how many units make one block. It defaults to 5.48, the width of a
+// ball transformer's plate (P_Trafo_* in docs/scale-calibration.md), so a block is the same
+// size as the transformer; 4.0 is the honest calibration (one ball across).
 //
 // M1b (2026-11-06) added two things to the same object, both in the space the
 // version-1 payload left as Reserved:
@@ -81,7 +82,8 @@ typedef struct MpCameraHeader {
     float Near;             // front plane, units
     float Far;              // back plane, units
     float Ball[3];          // player ball centre, units
-    float UnitsPerBlock;    // 5.0 = one block, drawn scale (the ball is 4.0 u across)
+    float UnitsPerBlock;    // units across one drawn block: 5.48 = a transformer plate,
+                            // 4.0 = one ball (the panel row Block steps it)
     uint32_t Frame;         // Ballance frame counter
     uint64_t TimeNs;        // CLOCK_MONOTONIC of the publish
     // --- M1b. These sit where version 1 had Reserved[0..], so every offset

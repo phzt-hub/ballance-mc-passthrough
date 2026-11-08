@@ -41,7 +41,7 @@ re-attaches its own camera on every `LaunchScene`.
 Also carries the PoC frame-log scaffolding: `BALLANCE_POC_FRAMELOG`,
 `BALLANCE_POC_BBOX`, `BALLANCE_POC_ISOLATE`, `BALLANCE_POC_CAM`.
 
-Also carries the in-game settings panel: `MinecraftSettings.*` (the eight rows, the
+Also carries the in-game settings panel: `MinecraftSettings.*` (the nine rows, the
 `Bin/Minecraft.ini` they are written to, and the environment override that wins over it),
 `MinecraftOverlay.*` (a self-drawn F1 overlay using the render context's post-sprite
 callback and the same 2D primitives as `BuildingBlocks/Interface/DrawingPrimitives.cpp`),

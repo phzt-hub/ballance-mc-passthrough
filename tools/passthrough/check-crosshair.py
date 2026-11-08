@@ -33,7 +33,7 @@ import time
 MPC_BYTES = 4096
 LAYOUT = "<IIIIII" + "3f" * 3 + "4f" + "3f" + "f" + "I" + "Q"
 FLAG_VALID, FLAG_BALL, FLAG_PAUSED, FLAG_LEVEL = 0x1, 0x2, 0x4, 0x8
-UNITS_PER_BLOCK = 4.0          # MpCameraHeader.UnitsPerBlock
+UNITS_PER_BLOCK = 5.48         # MpCameraHeader.UnitsPerBlock (panel row Block, default)
 EYE_HEIGHT_BLOCKS = 1.62       # the player entity stands on the ball's centre
 REACH_BLOCKS = 4.5
 

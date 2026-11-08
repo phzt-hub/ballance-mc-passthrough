@@ -12,13 +12,23 @@ Steve 的几个开关以前只能靠环境变量，改一次就是一次重启�
 |---|---|---|---|---|
 | `Steve` | `BALLANCE_MC_STEVE` | Steve in Ballance | 0 | 布尔 |
 | `FollowBall` | `BALLANCE_MC_STEVE_BALL` | Follow the ball | 1 | 布尔 |
-| `FirstPerson` | `BALLANCE_MC_STEVE_FP` | First person | 1 | 布尔 |
 | `HideSteve` | `BALLANCE_MC_STEVE_HIDE` | Hide Steve | 0 | 布尔 |
 | `HideBall` | `BALLANCE_MC_STEVE_HIDEBALL` | Hide the ball | 0 | 布尔 |
 | `Scale` | `BALLANCE_MC_STEVE_SCALE` | Model scale | 0.25 | ±0.05，限 0.05–2.0 |
 | `Sensitivity` | `BALLANCE_MC_STEVE_SENS` | Mouse sensitivity | 0.0025 | ±0.0005，限 0.0005–0.02 |
 | `AimLift` | `BALLANCE_MC_AIM_LIFT` | Aim lift (degrees) | 20 | ±1，限 0–30 |
+| `Block` | `BALLANCE_MC_BLOCK` | Block size (units) | 5.48 | ±0.05，限 2.0–8.0 |
 | `Debug` | `BALLANCE_MC_STEVE_DEBUG` | Debug log | 0 | 布尔 |
+
+`Block` 是一粒方块画多大（Ballance 单位），改的就是相机通道里的 `UnitsPerBlock`：
+
+- **5.48 = 变球器底板的宽度**（`P_Trafo_*` 是 5.48 x 5.48 x 0.50 u），于是摆在变球器旁的
+  方块和它一样大。这是现在的默认。
+- `4.0` = 标定表里的「一个球直径一格」，也是这个值原先的硬编码。
+
+两个数都说得通，取哪个是观感问题，所以做成了面板行而不是常量——`AimLift` 当初也是
+这样从常量搬进面板的。调这个等于整体缩放 Minecraft 世界相对 Ballance 的比例：调大，
+方块变大、球相对变小。
 
 `MinecraftSettings.cpp` 里是一张 `kRows[]`，ini 键 / 环境变量 / 标签 / 步进 /
 上下界 / ini 注释都在同一行，行数用 `static_assert` 和 `enum McSettingRow` 对齐。
