@@ -52,10 +52,10 @@ public final class LevelSession {
      * Extra ticks a level start waits for the game to publish its level number (2 s at 20 tps).
      *
      * <p>The flag that says "a level is running" comes from the attached camera, and the camera
-     * can be up a few frames before the level's SetLevelID behavior has run. Deciding in that
-     * window means deciding without the one field the decision actually needs, so the start
-     * waits for it -- briefly, and only when it is missing. A Player.exe that does not publish
-     * the field at all costs this two-second pause and nothing else.
+     * can be up a few frames before the level file has been loaded -- before, that is, the one
+     * value the decision actually needs. Deciding inside that window means deciding without it,
+     * so the start waits for it: briefly, and only when it is missing. A Player.exe that does not
+     * publish the field at all costs this two-second pause and nothing else.
      */
     private static final int LEVEL_ID_GRACE_TICKS = 40;
     private static boolean levelIdMissingLogged;
