@@ -12,7 +12,9 @@
 		"HudMixin",
 		"LevelRendererMixin",
 		"CloudRendererMixin",
-		"WeatherEffectRendererMixin"
+		"WeatherEffectRendererMixin",
+		"PlayerBoxMixin",
+		"PlayerBoxBoundsMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
