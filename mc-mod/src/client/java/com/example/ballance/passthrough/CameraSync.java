@@ -2,8 +2,11 @@ package com.example.ballance.passthrough;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,6 +44,7 @@ public final class CameraSync {
 
     private static volatile McCameraChannel.Pose framePose;
     private static boolean announced;
+    private static boolean mirrorAnnounced;
     private static boolean aspectWarned;
     private static int applied;
     private static long lastLogNanos;
@@ -299,6 +303,7 @@ public final class CameraSync {
         player.setYRot(yawPitch[0]);
         player.setXRot(yawPitch[1]);
         player.setOldPosAndRot();
+        mirrorToServer(client, player, x, y, z, yawPitch[0], yawPitch[1]);
 
         if (!announced) {
             announced = true;
@@ -309,6 +314,45 @@ public final class CameraSync {
         if ((++applied % 200) == 0) {
             LOGGER.info("camera sync: {} samples, player at {} {} {}",
                     applied, (int) x, (int) y, (int) z);
+        }
+    }
+
+    /**
+     * Puts the same eye on the server side of the integrated server (2026-11-08).
+     *
+     * <p>The client teleports itself onto the ball every tick; the server's copy of the player is
+     * only ever moved by movement packets, and those stop being applied as soon as the server is
+     * still waiting for an earlier teleport to be acknowledged -- which the next tick's snapTo
+     * guarantees never happens. Measured 2026-11-08: the server eye sat 8.0 blocks behind the
+     * client's and stayed there for tens of seconds.
+     *
+     * <p>That is the whole of "a block flashes for one frame and is then gone": if the crosshair
+     * is on a block, the vanilla placement path is used, the server finds the target out of reach
+     * from its own eye, refuses, and the client takes the block back. Placed into empty air the
+     * same click works, because {@code PassthroughInput.placeAtAim} writes those straight into
+     * the server level and never asks the player position.
+     *
+     * <p>No packet is involved: this is a single-player server in the same process, so the entity
+     * is simply put where the client is, and reach and line of sight are then measured from the
+     * eye the crosshair was drawn for.
+     */
+    private static void mirrorToServer(Minecraft client, LocalPlayer player,
+            double x, double y, double z, float yaw, float pitch) {
+        final IntegratedServer server = client.getSingleplayerServer();
+        if (server == null) {
+            return;
+        }
+        final ServerPlayer mirrored = server.getPlayerList().getPlayer(player.getUUID());
+        if (mirrored == null) {
+            return;
+        }
+        mirrored.setPos(x, y, z);
+        mirrored.setYRot(yaw);
+        mirrored.setXRot(pitch);
+        mirrored.setDeltaMovement(Vec3.ZERO);
+        if (!mirrorAnnounced) {
+            mirrorAnnounced = true;
+            LOGGER.info("camera sync: the integrated server's copy of the player follows the ball");
         }
     }
 

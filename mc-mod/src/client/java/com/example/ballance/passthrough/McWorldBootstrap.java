@@ -392,11 +392,22 @@ public final class McWorldBootstrap {
     private static int unzipTemplate(java.util.zip.ZipFile zip, Path dir) throws IOException {
         int files = 0;
         int refused = 0;
+        String firstRefused = null;
+        // Both sides of the containment test are normalised, not just the entry's target
+        // (2026-11-08). On this box the save path arrives with a "." component
+        // ("J:\bmc-project\runtime\.\mc\saves"); Path.normalize() drops that from the
+        // entry's target but keeps it in dir, so all 30 entries looked as if they escaped the
+        // directory: nothing unpacked, there was no level.dat, and the level quietly fell back
+        // to a plain void world.
+        final Path root = dir.toAbsolutePath().normalize();
         final java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = zip.entries();
         while (entries.hasMoreElements()) {
             final java.util.zip.ZipEntry entry = entries.nextElement();
-            final Path target = dir.resolve(entry.getName()).normalize();
-            if (!target.startsWith(dir)) {
+            final Path target = root.resolve(entry.getName()).normalize();
+            if (!target.startsWith(root)) {
+                if (firstRefused == null) {
+                    firstRefused = entry.getName() + " -> " + target;
+                }
                 ++refused;
                 continue;
             }
@@ -411,8 +422,9 @@ public final class McWorldBootstrap {
             ++files;
         }
         if (refused > 0) {
-            LOGGER.warn("refused {} template entr{} with an absolute or parent-relative path",
-                    refused, refused == 1 ? "y" : "ies");
+            LOGGER.warn("refused {} template entr{} with an absolute or parent-relative path"
+                    + " (root {}, first {})",
+                    refused, refused == 1 ? "y" : "ies", root, firstRefused);
         }
         return files;
     }
