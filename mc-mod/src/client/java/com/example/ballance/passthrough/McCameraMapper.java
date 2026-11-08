@@ -27,6 +27,17 @@ public final class McCameraMapper {
     private static double anchorZ;
     private static float unitsPerBlock = 4.0f;
 
+    /**
+     * True when the worlds are baked in absolute Ballance coordinates (2026-11-08).
+     *
+     * <p>Pre-baked level worlds have their blocks at {@code floor(units / cell)}, so the mapping
+     * cannot be re-anchored per level any more: the origin is the world origin, and only the
+     * vertical offset is free. Re-anchoring on a baked world would shift the level by up to a
+     * block depending on where the ball happened to be at the start, which is exactly the kind of
+     * half-block error the import exists to avoid.
+     */
+    private static boolean absolute;
+
     static {
         final String spec = System.getenv("BALLANCE_MC_ANCHOR");
         if (spec != null && !spec.isBlank()) {
@@ -57,6 +68,14 @@ public final class McCameraMapper {
      */
     public static synchronized void ensure(McCameraChannel.Pose pose) {
         final float scale = pose.unitsPerBlock() > 0.0f ? pose.unitsPerBlock() : unitsPerBlock;
+        if (absolute) {
+            unitsPerBlock = scale;
+            originX = 0.0;
+            originY = 0.0;
+            originZ = 0.0;
+            ready = true;
+            return;
+        }
         if (ready) {
             if (scale > 0.0f && Math.abs(scale - unitsPerBlock) > 1.0e-4f) {
                 unitsPerBlock = scale;
@@ -65,10 +84,23 @@ public final class McCameraMapper {
         }
         final double[] reference = pose.hasBall() ? pose.ball() : pose.eye();
         unitsPerBlock = scale > 0.0f ? scale : 4.0f;
-        originX = reference[0];
-        originY = reference[1];
-        originZ = reference[2];
+        originX = snap(reference[0], unitsPerBlock);
+        originY = snap(reference[1], unitsPerBlock);
+        originZ = snap(reference[2], unitsPerBlock);
         ready = true;
+    }
+
+    /**
+     * Rounds a world coordinate down to a multiple of the block size.
+     *
+     * <p>The origin is where the two worlds are pinned together, and it is also where the
+     * imported level's cell grid has to land (see {@link LevelVoxels}): a cell's index is
+     * {@code floor(units / cell)}, so an origin that is not itself on that grid would put every
+     * imported block a fraction of a cell off. Snapping costs at most one block of offset
+     * between the ball and the anchor, and makes the two grids the same grid.
+     */
+    private static double snap(double value, double cell) {
+        return cell <= 0.0 ? value : Math.floor(value / cell) * cell;
     }
 
     /**
@@ -83,14 +115,68 @@ public final class McCameraMapper {
         if (pose == null) {
             return;
         }
+        if (absolute) {
+            // A baked world already sits where the level is; nothing to move.
+            if (pose.unitsPerBlock() > 0.0f) {
+                unitsPerBlock = pose.unitsPerBlock();
+            }
+            originX = 0.0;
+            originY = 0.0;
+            originZ = 0.0;
+            ready = true;
+            return;
+        }
         final double[] reference = pose.hasBall() ? pose.ball() : pose.eye();
         if (pose.unitsPerBlock() > 0.0f) {
             unitsPerBlock = pose.unitsPerBlock();
         }
-        originX = reference[0];
-        originY = reference[1];
-        originZ = reference[2];
+        originX = snap(reference[0], unitsPerBlock);
+        originY = snap(reference[1], unitsPerBlock);
+        originZ = snap(reference[2], unitsPerBlock);
         ready = true;
+    }
+
+    /**
+     * Switches to absolute (pre-baked) coordinates and puts the anchor where the level wants it.
+     *
+     * <p>Only {@code anchorY} stays free: it is the vertical offset between a level's cell index
+     * and the world's build height, and it is the same number the template was baked with.
+     */
+    public static synchronized void setAbsolute(double anchorYBlocks) {
+        absolute = true;
+        originX = 0.0;
+        originY = 0.0;
+        originZ = 0.0;
+        anchorX = 0.0;
+        anchorY = anchorYBlocks;
+        anchorZ = 0.0;
+        ready = true;
+    }
+
+    public static synchronized boolean absolute() {
+        return absolute;
+    }
+
+    /** The block coordinate the Ballance origin maps to (the ball starts here). */
+    public static synchronized double[] anchor() {
+        return new double[]{anchorX, anchorY, anchorZ};
+    }
+
+    /**
+     * Moves the anchor vertically. The import needs it: the anchor is the ball, and a level that
+     * is tall (level 13 is 368 cells) would otherwise reach out of the world's build height.
+     */
+    public static synchronized void setAnchorY(double y) {
+        anchorY = y;
+    }
+
+    /** The origin as whole cells, i.e. what a baked voxel index is relative to. */
+    public static synchronized long[] originIndex(double cell) {
+        return new long[]{
+                (long) Math.floor(originX / cell),
+                (long) Math.floor(originY / cell),
+                (long) Math.floor(originZ / cell),
+        };
     }
 
     /** Serialises the origin for the log: "origin moved" is a diff, not an opinion. */

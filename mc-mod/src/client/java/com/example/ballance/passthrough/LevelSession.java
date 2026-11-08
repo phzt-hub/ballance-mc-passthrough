@@ -61,6 +61,15 @@ public final class LevelSession {
 
     private static boolean sampled;
     private static boolean outsideLevel = true;
+
+    /**
+     * Ticks during which a level start is ignored, set after a world swap.
+     *
+     * <p>The tick right after a swap can catch the channel mid-publish (no valid sample), which
+     * looks exactly like leaving the level; a level start a moment later then fired again and
+     * replaced the world it had just built (measured 2026-11-08: two swaps three seconds apart).
+     */
+    private static int cooldownTicks;
     private static int levelTicks;
     private static int menuTicks;
     private static boolean disconnectPending;
@@ -68,8 +77,16 @@ public final class LevelSession {
     /** The world the passthrough is playing in has had a world click: blocks may exist. */
     private static boolean touched;
 
-    /** Save id of the world being replaced, deleted once its replacement is up. */
+    /** Save id of the world being replaced, archived once its replacement is up. */
     private static String previousWorld;
+
+    /** Level identified at the start: which baked world to copy, 0 when nothing matched. */
+    private static int pendingLevel;
+    /** True when the replacement world came out of a template (no block placement needed). */
+    private static boolean pendingTemplate;
+
+    /** Whether the world being replaced had been built in; if not, it is not worth keeping. */
+    private static boolean previousTouched;
 
     private LevelSession() {
     }
@@ -102,6 +119,11 @@ public final class LevelSession {
             levelTicks = 0;
         }
         if (!sampled) {
+            if (pose == null || !pose.valid()) {
+                // Not a sample at all: taking it as "outside a level" would fake a level start
+                // as soon as the channel comes back.
+                return;
+            }
             // First readable sample: whatever it says is the baseline, not an edge. This is the
             // client starting up in the middle of a level.
             sampled = true;
@@ -109,6 +131,11 @@ public final class LevelSession {
             if (hasBall) {
                 McCameraMapper.reanchor(pose);
             }
+            return;
+        }
+        if (cooldownTicks > 0) {
+            --cooldownTicks;
+            outsideLevel = false;
             return;
         }
         if (outsideLevel && hasBall && levelTicks >= LEVEL_CONFIRM_TICKS) {
@@ -122,16 +149,36 @@ public final class LevelSession {
     }
 
     private static void onLevelEntered(Minecraft client, McCameraChannel.Pose pose) {
-        McCameraMapper.reanchor(pose);
-        LOGGER.info("level start: ball at {} -> mapping origin {} (the ball starts at the anchor)",
+        // Which level is this? The import needs the answer (it decides the mapping and which
+        // baked world to copy), and the ball is the only thing that knows: every level lives at
+        // its own absolute coordinates, so the floor closest under the ball names the level.
+        pendingLevel = LevelVoxels.identify(pose.ball());
+        pendingTemplate = false;
+        if (pendingLevel == 0) {
+            // Nothing matched: fall back to the behaviour from before the import, where the
+            // ball's position defines the origin of a plain void world.
+            McCameraMapper.reanchor(pose);
+        }
+        LOGGER.info("level start: level {} ball at {} -> mapping {}",
+                pendingLevel == 0 ? "?" : pendingLevel,
                 String.format("(%.1f, %.1f, %.1f)", pose.ball()[0], pose.ball()[1], pose.ball()[2]),
-                McCameraMapper.origin());
+                McCameraMapper.describe());
         if (!McWorldBootstrap.isPassthroughWorld()) {
             touched = false;
             return;
         }
-        if (!touched || client.level == null) {
+        // A baked world is used for every level start, even the very first: the world the
+        // client created at startup is a plain void one and would need the floor written in
+        // anyway, and a reload costs less than a world that is missing its blocks.
+        final boolean baked = pendingLevel > 0 && McWorldBootstrap.hasTemplate(pendingLevel);
+        if (!baked && (!touched || client.level == null)) {
             LOGGER.info("level start: this world has not been built in, keeping it");
+            if (pendingLevel > 0) {
+                // A world created at startup is a plain void one, so the level's floor still
+                // has to be written into it.
+                LevelVoxels.beginPlacement(pendingLevel);
+                LevelVoxels.checkFloorSoon();
+            }
             return;
         }
         beginRecreate(client);
@@ -139,6 +186,7 @@ public final class LevelSession {
 
     private static void beginRecreate(Minecraft client) {
         previousWorld = McWorldBootstrap.currentWorldId();
+        previousTouched = touched;
         state = State.LEAVING;
         stateSince = System.nanoTime();
         disconnectPending = true;
@@ -169,7 +217,10 @@ public final class LevelSession {
                 state = State.WAITING;
                 stateSince = System.nanoTime();
                 try {
-                    McWorldBootstrap.createFreshWorld(client);
+                    // A baked world already contains the level's floor; a plain void world has
+                    // to have it written in afterwards (LevelVoxels.beginPlacement in finish).
+                    pendingTemplate = pendingLevel > 0
+                            && McWorldBootstrap.openLevelWorld(client, pendingLevel);
                 } catch (Throwable throwable) {
                     LOGGER.error("could not create the next world", throwable);
                     finish(client, false);
@@ -194,13 +245,28 @@ public final class LevelSession {
         // baseline instead of the edge that would replace this world again.
         sampled = false;
         outsideLevel = false;
+        cooldownTicks = 100;
         levelTicks = 0;
         menuTicks = 0;
         if (ready) {
             LOGGER.info("world ready: \"{}\" (previous save {})", McWorldBootstrap.currentWorldId(),
                     previousWorld == null ? "(none)" : "\"" + previousWorld + "\"");
             if (previousWorld != null) {
-                McWorldBootstrap.deleteWorld(client, previousWorld);
+                if (previousTouched) {
+                    // Kept, not deleted: the user wants every instance, named by when it was
+                    // played. Worlds nobody built in (the empty one a session starts with) are
+                    // dropped instead, or every session would leave a pile of them behind.
+                    McWorldBootstrap.archiveWorld(client, previousWorld);
+                } else {
+                    McWorldBootstrap.deleteWorld(client, previousWorld);
+                }
+            }
+            previousTouched = false;
+            if (!pendingTemplate && pendingLevel > 0) {
+                LevelVoxels.beginPlacement(pendingLevel);
+            }
+            if (pendingLevel > 0) {
+                LevelVoxels.checkFloorSoon();
             }
         }
         previousWorld = null;

@@ -62,9 +62,11 @@ J:\bmc-project\run-ballance.bat    :: 2) 带 BALLANCE_MC_PASSTHROUGH=1 起 Balla
 | 反向输入：E 开创造物品栏、滚轮换格、点物品 | ✅ M1b | [docs/m1b-input.md](docs/m1b-input.md) |
 | 摆方块 / 挖方块，射线打空时在准星前 4.5 格生成 | ✅ M1c | [docs/m1c-place.md](docs/m1c-place.md) |
 | 准星跟着球漂，钉在「这一下会放方块的地方」 | ✅ 11-07 | [docs/m1b-input.md](docs/m1b-input.md) 第五节 |
-| 每个关卡一个全新的世界（从菜单进关就删档重建） | ✅ 11-07 | [docs/level-worlds.md](docs/level-worlds.md) |
+| 每个关卡一个新的世界；旧世界按时间戳留档，不再删掉 | ✅ 11-07 / 11-08 | [docs/level-worlds.md](docs/level-worlds.md) |
 | F1 设置面板，9 行开关就地生效 | ✅ | [docs/settings-panel.md](docs/settings-panel.md) |
 | 自由视角：按 F 绕球转镜头，球的行进方向一点不变 | ✅ 11-08 | [docs/free-view.md](docs/free-view.md) |
+| 关卡地形导入：球道/墙/柱子变成**看不见的** barrier，红石、铁轨、火把有地方放 | ✅ 11-08 | [docs/voxel-import.md](docs/voxel-import.md) |
+| 13 关预烘成存档模板，进关卡拷一份；每次进关新实例，旧的按时间戳留档 | ✅ 11-08 | [docs/voxel-import.md](docs/voxel-import.md) |
 
 尺度：**1 方块 = 5.48 Ballance 单位**（默认值，F1 面板第 8 行可改）。4.0 是标定表里「一个球径」的数，
 但和变球器 `P_Trafo_*` 的 5.48 对不上，取后者，理由见 [docs/scale-calibration.md](docs/scale-calibration.md)；

@@ -147,11 +147,12 @@ public final class McWorldBootstrap {
             });
             return;
         }
-        // A new session starts from nothing: the saves the last one left behind are ours and
-        // disposable, and leaving them would put their blocks in this session's first level.
-        final int removed = deleteOldWorlds(client);
-        if (removed > 0) {
-            LOGGER.info("removed {} void save(s) from an earlier session", removed);
+        // The session before this one left its last instance behind under an un-timestamped id.
+        // Since 2026-11-08 that is user data (the user asked for every instance to be kept),
+        // so it is archived rather than deleted -- and archiving frees the id for reuse.
+        final int archived = archiveLeftovers(client);
+        if (archived > 0) {
+            LOGGER.info("archived {} instance(s) left by an earlier session", archived);
         }
         createFreshWorld(client);
     }
@@ -223,6 +224,151 @@ public final class McWorldBootstrap {
             LOGGER.warn("could not list the saves in {}: {}", saves, exception.toString());
         }
         return removed;
+    }
+
+    /**
+     * Copies the pre-baked world for {@code levelId} into a new save and opens it.
+     *
+     * <p>The templates are the 13 levels written once with {@code BALLANCE_MC_BAKE} and shipped
+     * inside the mod (tools/voxel/bake-levels.sh). A level start then only has to unpack one of
+     * them: the world is complete from the first frame, which is what the user asked for --
+     * "预先处理 13 个关卡，变成世界存在存档文件夹里".
+     *
+     * @return true when a template was used; false when the caller gets a plain void world and
+     *         has to place the blocks itself
+     */
+    public static boolean openLevelWorld(Minecraft client, int levelId) {
+        final String template = String.format("Level_%02d", levelId);
+        if (levelId < 1 || !hasTemplate(template)) {
+            createFreshWorld(client);
+            return false;
+        }
+        final String id = nextWorldId(client);
+        try {
+            final int files = extractTemplate(client, template, id);
+            LOGGER.info("opening the baked world for {} as \"{}\" ({} files)", template, id, files);
+        } catch (IOException | RuntimeException error) {
+            LOGGER.warn("could not unpack the baked world {}: {}", template, error.toString());
+            createFreshWorld(client);
+            return false;
+        }
+        passthroughWorld = true;
+        currentWorldId = id;
+        PassthroughScene.markPassthroughWorld();
+        client.createWorldOpenFlows().openWorld(id, () -> {
+            LOGGER.warn("baked world \"{}\" could not be opened", id);
+            passthroughWorld = false;
+        });
+        return true;
+    }
+
+    /** True when this build carries a baked world for the level. */
+    public static boolean hasTemplate(int levelId) {
+        return levelId >= 1 && hasTemplate(String.format("Level_%02d", levelId));
+    }
+
+    private static boolean hasTemplate(String name) {
+        return McWorldBootstrap.class.getResource("/assets/ballance/templates/" + name + ".zip") != null;
+    }
+
+    /** Unpacks one template zip into saves/<id>. */
+    private static int extractTemplate(Minecraft client, String name, String id) throws IOException {
+        final Path dir = client.getLevelSource().getLevelPath(id);
+        Files.createDirectories(dir);
+        int files = 0;
+        try (java.io.InputStream raw = McWorldBootstrap.class.getResourceAsStream(
+                "/assets/ballance/templates/" + name + ".zip")) {
+            if (raw == null) {
+                throw new IOException("no " + name + ".zip in the mod");
+            }
+            try (java.util.zip.ZipInputStream zip = new java.util.zip.ZipInputStream(raw)) {
+                java.util.zip.ZipEntry entry;
+                while ((entry = zip.getNextEntry()) != null) {
+                    final Path target = dir.resolve(entry.getName()).normalize();
+                    if (!target.startsWith(dir)) {
+                        continue;   // zip slip
+                    }
+                    if (entry.isDirectory()) {
+                        Files.createDirectories(target);
+                        continue;
+                    }
+                    Files.createDirectories(target.getParent());
+                    Files.copy(zip, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    ++files;
+                }
+            }
+        }
+        return files;
+    }
+
+    /**
+     * Renames one of our saves out of the way instead of deleting it (2026-11-08).
+     *
+     * <p>The user asked for every instance to be kept: a level start archives the world it
+     * replaces as {@code <id>-<yyyyMMdd-HHmmss>} -- a different id, so the cleanup helpers here
+     * never touch it again. The log says how many are kept now, and complains past twenty.
+     */
+    public static boolean archiveWorld(Minecraft client, String id) {
+        if (id == null || id.isBlank() || id.equals(currentWorldId)) {
+            return false;
+        }
+        final Path path = client.getLevelSource().getLevelPath(id);
+        if (!Files.isDirectory(path)) {
+            return false;
+        }
+        final String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+        final Path target = path.resolveSibling(id + "-" + stamp);
+        try {
+            Files.move(path, target);
+        } catch (IOException exception) {
+            LOGGER.warn("could not archive \"{}\": {}", id, exception.toString());
+            return false;
+        }
+        final int kept = countInstances(client);
+        LOGGER.info("archived the last instance as \"{}\" ({} instances kept{})", target.getFileName(),
+                kept, kept > 20 ? " -- over 20, consider cleaning up" : "");
+        return true;
+    }
+
+    /** Archives every un-timestamped instance of ours. Only called with no world loaded. */
+    public static int archiveLeftovers(Minecraft client) {
+        final Path saves = client.getLevelSource().getLevelPath(BASE_WORLD).getParent();
+        if (saves == null || !Files.isDirectory(saves)) {
+            return 0;
+        }
+        int archived = 0;
+        try (Stream<Path> entries = Files.list(saves)) {
+            for (Path path : entries.toList()) {
+                final String name = path.getFileName().toString();
+                if (Files.isDirectory(path) && isOwnWorld(name) && !name.equals(currentWorldId)
+                        && archiveWorld(client, name)) {
+                    ++archived;
+                }
+            }
+        } catch (IOException exception) {
+            LOGGER.warn("could not list the saves in {}: {}", saves, exception.toString());
+        }
+        return archived;
+    }
+
+    /** How many instance saves (current + archived) this mod owns. */
+    public static int countInstances(Minecraft client) {
+        final Path saves = client.getLevelSource().getLevelPath(BASE_WORLD).getParent();
+        if (saves == null || !Files.isDirectory(saves)) {
+            return 0;
+        }
+        int count = 0;
+        try (Stream<Path> entries = Files.list(saves)) {
+            for (Path path : entries.toList()) {
+                final String name = path.getFileName().toString();
+                if (Files.isDirectory(path) && (isOwnWorld(name) || name.startsWith(BASE_WORLD + "-"))) {
+                    ++count;
+                }
+            }
+        } catch (IOException exception) {
+            LOGGER.warn("could not list the saves in {}: {}", saves, exception.toString());
+        }
+        return count;
     }
 
     /** Deletes one save directory. Refuses the id of the world being played right now. */
