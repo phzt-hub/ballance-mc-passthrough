@@ -1,5 +1,7 @@
 # ballance-mc-passthrough
 
+**中文** | [English](README.en.md)
+
 把 **Minecraft 的画面按 alpha 合成进 Ballance**，并让两个**未经修改**的游戏互相驱动：
 Ballance 的镜头和球位送给 MC 当相机，Ballance 的鼠标键盘送给 MC 当输入。
 
