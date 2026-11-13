@@ -530,29 +530,86 @@ public final class CameraSync {
 
     // ------------------------------------------------------------------ aim watch
 
+    /**
+     * How far the player may move between two ticks before the aim is called moved rather than
+     * aimed (2026-11-08). A restart or a fall out of the level teleports the ball tens of blocks
+     * in one tick; the fastest roll in the game moves it under one.
+     */
+    private static final double TELEPORT_STEP = 3.0;
+    /** Labels remembered, so a box blinking between two cells can be told from a sweep. */
+    private static final int AIM_HISTORY = 24;
+    /** Revisits within one window that no player could be producing (measured 0 in the 15:08 run). */
+    private static final int FLICKER_REVISITS = 6;
+
     private static String lastHitLabel;
+    private static final String[] aimHistory = new String[AIM_HISTORY];
+    private static int aimHistorySize;
+    private static int aimHistoryNext;
     private static int hitChanges;
+    private static int hitRevisits;
+    private static int hitTeleports;
     private static long hitWindowNanos;
+    private static double lastPlayerX = Double.NaN;
+    private static double lastPlayerY;
+    private static double lastPlayerZ;
+    private static double aimStep;
 
     /**
-     * Counts how often the block under the crosshair changes, and says so once a second when
-     * it changed more often than a player could be re-aiming (2026-11-08).
+     * Counts how the block under the crosshair moves, and says so when it moves in a way a
+     * player could not be causing (2026-11-08).
      *
      * <p>The user's report was a blinking selection box. That box is drawn for
      * {@code Minecraft.hitResult}, so a measurement of how that value moves is the difference
      * between "the aim really is jumping" and "the aim is steady and the picture is what
      * flickers" -- two different bugs with two different fixes.
+     *
+     * <p>The first version counted <em>changes</em> and reported eight in a second, which is what
+     * every fast roll and every restart produces: a ball crossing a cell boundary changes the
+     * target twice per block at twenty blocks a second, and a teleport changes it outright. All
+     * six reports in the 15:08 run were teleports of twenty-four blocks in a single tick. What
+     * blinking looks like from here is the aim <em>returning</em> to a cell it has just left --
+     * A, B, A -- so that is what is counted now; a step longer than {@link #TELEPORT_STEP}
+     * restarts the window instead of counting; and the line carries the largest step and the
+     * teleport count, so a false report can be told from a real one without another run.
      */
     public static void watchHitTarget(Minecraft client) {
         final HitResult hit = client.hitResult;
         final String label = hit == null ? "null"
                 : hit instanceof BlockHitResult block ? String.valueOf(block.getBlockPos())
                 : hit.getType().name();
+        final long now = System.nanoTime();
+        if (client.player != null) {
+            final double x = client.player.getX();
+            final double y = client.player.getY();
+            final double z = client.player.getZ();
+            final double step = Double.isNaN(lastPlayerX) ? 0.0
+                    : Math.sqrt((x - lastPlayerX) * (x - lastPlayerX)
+                            + (y - lastPlayerY) * (y - lastPlayerY)
+                            + (z - lastPlayerZ) * (z - lastPlayerZ));
+            lastPlayerX = x;
+            lastPlayerY = y;
+            lastPlayerZ = z;
+            aimStep = Math.max(aimStep, step);
+            if (step > TELEPORT_STEP) {
+                // The ball was put somewhere else, not aimed somewhere else.
+                ++hitTeleports;
+                lastHitLabel = label;
+                aimHistorySize = 0;
+                aimHistoryNext = 0;
+                hitWindowNanos = now;
+                return;
+            }
+        }
         if (!label.equals(lastHitLabel)) {
             lastHitLabel = label;
             ++hitChanges;
+            if (seenInAimHistory(label)) {
+                ++hitRevisits;
+            }
+            aimHistory[aimHistoryNext] = label;
+            aimHistoryNext = (aimHistoryNext + 1) % AIM_HISTORY;
+            aimHistorySize = Math.min(aimHistorySize + 1, AIM_HISTORY);
         }
-        final long now = System.nanoTime();
         if (hitWindowNanos == 0L) {
             hitWindowNanos = now;
             return;
@@ -561,9 +618,11 @@ public final class CameraSync {
         if (span < 1_000_000_000L) {
             return;
         }
-        if (hitChanges >= 8 && client.player != null) {
-            LOGGER.info("aim target changed {} times in {} ms, now {} player=({},{},{}) yaw={} pitch={}",
-                    hitChanges, span / 1_000_000L, label,
+        if (hitRevisits >= FLICKER_REVISITS && client.player != null) {
+            LOGGER.info("aim flicker: {} revisits of {} changes in {} ms, step<={} teleports {} now {}"
+                            + " player=({},{},{}) yaw={} pitch={}",
+                    hitRevisits, hitChanges, span / 1_000_000L,
+                    String.format("%.2f", aimStep), hitTeleports, label,
                     String.format("%.2f", client.player.getX()),
                     String.format("%.2f", client.player.getY()),
                     String.format("%.2f", client.player.getZ()),
@@ -572,5 +631,18 @@ public final class CameraSync {
         }
         hitWindowNanos = now;
         hitChanges = 0;
+        hitRevisits = 0;
+        hitTeleports = 0;
+        aimStep = 0.0;
+    }
+
+    /** Whether this cell was already under the crosshair recently, i.e. the aim came back to it. */
+    private static boolean seenInAimHistory(String label) {
+        for (int i = 0; i < aimHistorySize; i++) {
+            if (label.equals(aimHistory[Math.floorMod(aimHistoryNext - 1 - i, AIM_HISTORY)])) {
+                return true;
+            }
+        }
+        return false;
     }
 }

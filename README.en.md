@@ -157,6 +157,20 @@ tick (it used to be TAIL, which meant this tick's ray cast and next frame's came
 the source of the flickering selection box); and `client.hitResult` is refreshed with the freshly computed pick
 before the right-click is dispatched.
 
+**11-13 follow-up: ② was only half right.** In a 2m12s log from `bmc-tpl-10`, 14 right presses gave
+`clientSays` / `serverSays` **14/14 identical**, with a client/server eye difference of 0.00..0.11 blocks --
+the two sides had been in sync all along. "One spot never accepts a block" had another cause: in 3 of those
+14 presses the cell the block would have gone into already held the level's own invisible `barrier`, so
+vanilla had no cell to place into and told nobody. A right press now has four outcomes -- nothing under the
+ray, a replaceable target cell, a target cell holding a barrier, and everything else; the barrier case
+replaces that cell with the held block (full collision cubes only: the barrier is what the ball rolls on),
+and every refusal prints `blocked_by=`. Each placement is read back within four ticks and logged as
+`placement ok` or `placement refused`, so whether the click worked no longer has to be argued from
+position readings. The `aim target changed` predicate changed with it: it counted changes per second, which
+is what fast rolling and respawn teleports look like (all six reports in that run were 24-block teleports);
+it now counts returns to a cell the aim has just left (A->B->A). Details in
+[docs/m1c-place.md](docs/m1c-place.md).
+
 **③ The crosshair does not follow the ball**
 
 "Not following" is really "the gap keeps changing": the pitch offset is 20°, and how many pixels 20° amounts to

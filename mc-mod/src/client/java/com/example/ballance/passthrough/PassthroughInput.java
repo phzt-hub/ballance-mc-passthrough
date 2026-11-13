@@ -12,6 +12,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -105,6 +109,9 @@ public final class PassthroughInput {
             return;
         }
         ++ticks;
+        // A press is answered by the server a tick or two later, not by the press itself:
+        // this is where that answer is read back (2026-11-08).
+        checkPlacement(client);
 
         final Screen current = client.gui.screen();
         final boolean open = current instanceof CreativeModeInventoryScreen;
@@ -297,23 +304,7 @@ public final class PassthroughInput {
                 // A world that has been clicked in is a world with blocks in it: the next
                 // level entered from the menu gets a fresh one (LevelSession).
                 LevelSession.noteWorldTouched();
-                // A void world has nothing to place against: vanilla finds no block under the
-                // aim and falls through to useItem, where a plain BlockItem does nothing. So the
-                // block is spawned at the end of the reach instead. Once one exists the ray hits
-                // it and the vanilla branch takes over, with no special case left behind.
-                if (aimingAtBlock(client) || !placeAtAim(client)) {
-                    // The placement packet is built from this field later in the tick, so it
-                    // is refreshed from the very pick that is about to be logged and acted on.
-                    // A stale one is a placement the server refuses and the client takes back:
-                    // the block flashes for a frame and is gone.
-                    final HitResult aim = aimResult(client);
-                    if (aim != null) {
-                        client.hitResult = aim;
-                    }
-                    LOGGER.info("world right press aim={} held={} {}", describe(aim),
-                            client.player.getMainHandItem(), serverView(client));
-                    mouseKey(3, true);
-                }
+                rightPress(client);
             } else {
                 mouseKey(3, false);
             }
@@ -342,6 +333,147 @@ public final class PassthroughInput {
                 client.mouseHandler.onScroll(client.getWindow().handle(), 0.0,
                         delta / McCameraChannel.WHEEL_UNITS_PER_NOTCH);
             }
+        }
+    }
+
+    // ------------------------------------------------------------ the world's right button
+
+    /**
+     * What a right press does, and what it says it did (2026-11-08).
+     *
+     * <p>There are four cases and only the first is vanilla. The one that mattered is the third:
+     * the ray hits a block, but the cell the block would go into is taken, so vanilla has nothing
+     * to do and the server silently declines -- no packet in the log, no block, no explanation.
+     * When the block standing in that cell is the level's own barrier geometry (the invisible
+     * collider that stands in for a Ballance surface, which is what most walls of a level are),
+     * the surface under the crosshair <em>is</em> that cell, so the block is written there
+     * instead. Every other refusal is printed with the cell's actual content: the user's "this
+     * spot never takes a block, two steps along it always does" was this case, and it was the
+     * silent one.
+     */
+    private static void rightPress(Minecraft client) {
+        final HitResult aim = aimResult(client);
+        final net.minecraft.world.item.ItemStack held = client.player.getMainHandItem();
+        if (aim == null || aim.getType() != HitResult.Type.BLOCK) {
+            // Nothing under the aim to place against (a world with nothing in it yet): vanilla
+            // finds no block and falls through to useItem, where a plain BlockItem does nothing.
+            // So the block is spawned at the end of the reach instead. Once one exists the ray
+            // hits it and this stops being reached.
+            if (aim != null) {
+                client.hitResult = aim;
+            }
+            final boolean placed = placeAtAim(client);
+            LOGGER.info("world right press aim={} held={} {} {}", describe(aim), held,
+                    placed ? "placed at the end of the reach" : "nothing placed, using the item",
+                    serverView(client));
+            // Dispatched either way: a bow, a bucket or a pearl still does its own thing in the
+            // air, and the line above has already said whether a block went down.
+            mouseKey(3, true);
+            return;
+        }
+        final BlockHitResult block = (BlockHitResult) aim;
+        final BlockPos surface = block.getBlockPos();
+        final BlockPos target = surface.relative(block.getDirection());
+        // The placement packet is built from this field later in the tick, so it is refreshed
+        // from the very pick that is about to be logged and acted on. A stale one is a placement
+        // the server refuses and the client takes back: the block flashes and is gone.
+        client.hitResult = aim;
+        // The same test the server applies to the packet (BlockItem.place, canBeReplaced), so
+        // that "the log says open" means "the server will take this one".
+        if (client.level != null && client.level.getBlockState(target).canBeReplaced()) {
+            LOGGER.info("world right press aim={} held={} target=open {}",
+                    describe(aim), held, serverView(client));
+            mouseKey(3, true);
+            watchPlacement(client, target, "open");
+            return;
+        }
+        if (client.level != null && client.level.getBlockState(surface).is(Blocks.BARRIER)
+                && placeSurface(client, surface, held)) {
+            LOGGER.info("world right press aim={} held={} target=barrier, replaced the surface itself {}",
+                    describe(aim), held, serverView(client));
+            watchPlacement(client, surface, "surface");
+            return;
+        }
+        // No cell free and nothing that may be overwritten. Say so, with what is in the way.
+        LOGGER.info("world right press aim={} held={} blocked_by={} -> refused {}",
+                describe(aim), held,
+                client.level == null ? "?" : client.level.getBlockState(target), serverView(client));
+    }
+
+    /**
+     * Writes the held block into a cell the level's barrier is standing in, when that leaves the
+     * level as solid as it was (2026-11-08).
+     *
+     * <p>The barrier is what the ball rolls on, so it is only replaced by something whose
+     * collision shape is a full cube: a torch, a rail or a slab would take the floor out from
+     * under the ball. Everything else is refused here, before anything is written.
+     */
+    private static boolean placeSurface(Minecraft client, BlockPos pos,
+            net.minecraft.world.item.ItemStack held) {
+        if (!(held.getItem() instanceof BlockItem item)) {
+            return false;
+        }
+        final BlockState state = item.getBlock().defaultBlockState();
+        if (!state.isCollisionShapeFullBlock(client.level, pos)) {
+            LOGGER.info("surface: {} is not a full cube, the barrier stays", state.getBlock());
+            return false;
+        }
+        final ServerLevel level = serverLevel(client);
+        return level != null && level.setBlockAndUpdate(pos, state);
+    }
+
+    private static ServerLevel serverLevel(Minecraft client) {
+        final IntegratedServer server = client.getSingleplayerServer();
+        return server == null || client.level == null
+                ? null : server.getLevel(client.level.dimension());
+    }
+
+    // ---------------------------------------------------------------- placement watch
+
+    /** Ticks a press is given to be answered before the block is called missing (2026-11-08). */
+    private static final int PLACEMENT_TICKS = 4;
+
+    private static int pendingTicks;
+    private static BlockPos pendingPos;
+    private static Block pendingBlock;
+    private static String pendingHow;
+
+    /**
+     * Remembers what a press should have put down, so the next few ticks can say whether it did
+     * (2026-11-08).
+     *
+     * <p>The press cannot answer for itself: the block appears when the integrated server has
+     * accepted the packet and the client has taken the update back, one or two ticks later. Until
+     * now the log had the press and nothing else, so "the click went nowhere" and "the click
+     * worked" were the same line with different outcomes, and every question about it had to be
+     * argued from position readings.
+     */
+    private static void watchPlacement(Minecraft client, BlockPos pos, String how) {
+        pendingPos = null;
+        if (!(client.player.getMainHandItem().getItem() instanceof BlockItem item)) {
+            return;
+        }
+        pendingPos = pos.immutable();
+        pendingBlock = item.getBlock();
+        pendingHow = how;
+        pendingTicks = PLACEMENT_TICKS;
+    }
+
+    private static void checkPlacement(Minecraft client) {
+        if (pendingPos == null || client.level == null) {
+            return;
+        }
+        final BlockState now = client.level.getBlockState(pendingPos);
+        if (pendingBlock != null && now.is(pendingBlock)) {
+            LOGGER.info("placement ok ({}): {} at {} after {} ticks", pendingHow, pendingBlock,
+                    pendingPos, PLACEMENT_TICKS - pendingTicks + 1);
+            pendingPos = null;
+            return;
+        }
+        if (--pendingTicks <= 0) {
+            LOGGER.info("placement refused ({}): {} at {} is still {}", pendingHow, pendingBlock,
+                    pendingPos, now);
+            pendingPos = null;
         }
     }
 
@@ -410,11 +542,6 @@ public final class PassthroughInput {
             return null;
         }
         return client.player.pick(CameraSync.REACH_BLOCKS, 0.0f, false);
-    }
-
-    private static boolean aimingAtBlock(Minecraft client) {
-        final HitResult hit = aimResult(client);
-        return hit != null && hit.getType() == HitResult.Type.BLOCK;
     }
 
     private static String describe(HitResult hit) {

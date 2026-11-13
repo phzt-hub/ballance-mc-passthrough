@@ -11,13 +11,57 @@
 | 输入 | 屏幕关着时做什么 |
 |---|---|
 | 左键 | 原版攻击：`startAttack()` → `startDestroyBlock`，创造模式一下碎 |
-| 右键 | 射线**命中**方块 → 原版放置/交互；**没命中**且手上是方块 → 在准星前 4.5 格凭空生成一块 |
+| 右键 | 四种结果（射线打空 / 目标格空着 / 目标格是 barrier / 其余），见「1.1」 |
 | 中键 | 原版取方块（`pickBlockOrEntity`） |
 | 滚轮 | 原版换快捷栏（`MouseHandler.onScroll` 的无屏分支） |
 | E / Esc | 和 M1b 一样，开关创造物品栏 |
 
 生成那一块之后，射线就会命中它，**后面每一次放置都走原版**：
 贴边、叠高、对准面，全是 MC 自己的规则，没有第二套代码。
+
+### 1.1 11-13：右键的四种结果
+
+11-08 把「某处一直放不上方块，换个地方就行」归到了「服务端的眼睛落后客户端」。
+11-13 那局把这个假设证伪了：**14 次右键里，服务端与客户端的眼睛差 0.00–0.11 格，
+`clientSays` 与 `serverSays` 14/14 完全相同**。两侧从来不是不同步的。
+
+真正的原因在同一份日志里躺着：14 次右键有 **3 次**的目的格本身就是 `barrier` ——
+
+```
+world right press aim=(-1,100,-2)/west   target=(-2,100,-2)
+    clientSays=barrier  serverSays=barrier
+```
+
+关卡的世界是烘出来的**不可见 barrier**（Ballance 地表的碰撞代理）。射线打中一面墙，
+要放方块的那一格往往**也是** barrier，原版就没有格子可放，服务端照规矩拒绝，
+而客户端这一侧一行日志都不打 —— 于是「点了没反应」。
+
+现在四种情况各有归宿，每一行都写清楚：
+
+| 情况 | 做什么 | 日志 |
+|---|---|---|
+| 射线打空 | 在 `eye + look * 4.5` 生成一块 | `aim=MISS ... placed at the end of the reach` |
+| 目标格可替换（`canBeReplaced()`，与服务端同一条判据） | 原版放置 | `target=open` |
+| 目标格被 `Blocks.BARRIER` 占着 | 把**那一格本身**换成手里的方块 | `target=barrier, replaced the surface itself` |
+| 其余 | 不派发，写明被什么挡住 | `blocked_by=<那一格实际的方块> -> refused` |
+
+第三种是这次唯一的新行为：你瞄的那面不可见墙就是关卡地表，方块落在它上面
+（也就是十字准星底下），而不是往里三格。护栏是 `isCollisionShapeFullBlock` ——
+只接受碰撞形状整格的方块：barrier 是球滚的那层，换成火把、铁轨、半砖等于把地板抽走。
+
+### 1.2 落地校验：`placement ok` / `placement refused`
+
+按下去放没放上，按下这一刻是不知道的：方块要等服务端收了包、再把更新发回客户端，
+一两个 tick 之后才出现。所以每次右键都记下「该出现在哪格、是什么方块」，
+四个 tick 内读一次客户端世界：
+
+```
+placement ok (open): minecraft:stone at (-2,100,-2) after 1 ticks
+placement refused (open): minecraft:stone at (-2,100,-2) is still minecraft:air
+```
+
+`open` 是走原版的那次，`surface` 是换掉 barrier 的那次。以后再看「为什么没放上」，
+不用再从位置读数里反推。
 
 ## 二、两道墙
 
@@ -55,6 +99,8 @@ if (openNow) {            // 创造物品栏在屏幕上
 | 世界输入转发 | `PassthroughInput.forwardWorldInput` | 左右中键、滚轮，按 `pose.buttons()` 的位变化 |
 | 按键注入 | `PassthroughInput.mouseKey` | `KeyMapping.set(key, down)` + 按下时 `KeyMapping.click(key)` |
 | 兜底放置 | `PassthroughInput.placeAtAim` | 主手是 `BlockItem` 时，在 `eye + look * 4.5` 的格子 `setBlockAndUpdate` |
+| 地表替换 | `PassthroughInput.placeSurface` | 目标格被关卡自己的 barrier 占着时，用碰撞整格的方块换掉那一格 |
+| 落地校验 | `PassthroughInput.watchPlacement` / `checkPlacement` | 四个 tick 内回读那一格，日志给 `placement ok` / `placement refused` |
 | 比例 | `MinecraftCameraSync.cpp` | `UnitsPerBlock = 5.0`（球直径 4 u = 0.8 格） |
 
 ### 为什么不走 `MouseHandler.onButton`
@@ -85,7 +131,7 @@ if (down) KeyMapping.click(mouseKey(button));
 `client.getSingleplayerServer().getLevel(dimension).setBlockAndUpdate(pos, state)`
 走服务端，包会自己回到客户端。
 
-## 四、五个坑
+## 四、六个坑
 
 ### 1. `Type.MISS` 也是 `BlockHitResult`
 
@@ -182,6 +228,12 @@ units/blk 4.000
 世界里不需要 `MouseX/MouseY`：放置射线从玩家眼睛沿**旋转**出发，而旋转是
 `CameraSync` 每 tick 从球位和 `aimLift` 算出来的。所以世界分支不碰
 `MouseHandler` 的指针位置，只送按键。
+
+### 6. 关卡地表是**不可见**的，于是「没反应」看着像 bug
+
+球滚的那层是 `Blocks.BARRIER`，渲染上完全透明，选中框画上去也看不见。射线打中它的时候，
+屏幕上没有任何标记 —— 用户看到的是「我对着空地右键，什么都没发生」。
+能看出来的只有日志：`blocked_by=` 说明目标格被什么挡住，`target=barrier` 说明换格那条路走了。
 
 ## 五、验收（`tools/passthrough/test-m1c.sh`）
 
