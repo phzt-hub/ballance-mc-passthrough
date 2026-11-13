@@ -305,7 +305,9 @@ external/fetch-upstream.sh fetch upstream Ballanced / CKRenderEngine (not distri
 | MC-side mod jar | `cd mc-mod && ./gradlew25 build` → `mc-mod/build/libs/ballance_passthrough-1.0.0.jar` | `runtime\mc\mods\` |
 | Ballance-side `Player.exe` + plugin DLLs | `tools/windows/rebuild-pt.cmd` (scheduled task `bmc-pt`): configure → build → robocopy | `J:\bmc-project\runtime\{Bin,RenderEngines,…}` |
 
-The jar of the current build (`fa443f0`) is **12,579,554 bytes, md5 `66bfb7606154623f4e83e66e99e957c3`**.
+The jar of the current build (`2ef805b`) is **12,581,522 bytes, md5 `2ffd92b70e2f6faa03550c7cc34784f8`**.
+The 2026-11-13 build has only been built on the dev machine and smoke-tested on Linux -- it is **not on the 128
+box yet** (that host was unreachable), which still runs the 11-08 `66bfb760...`.
 
 `rebuild-pt.cmd` copies only `.exe`/`.dll` into the runtime directory and **does not touch**
 `Player.ini` / `Minecraft.ini` / logs, so rebuilding never loses the settings in your panel. Note, per the upstream

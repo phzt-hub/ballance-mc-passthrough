@@ -287,7 +287,9 @@ external/fetch-upstream.sh  拉上游 Ballanced / CKRenderEngine（不随本仓�
 | MC 侧 mod jar | `cd mc-mod && ./gradlew25 build` → `mc-mod/build/libs/ballance_passthrough-1.0.0.jar` | `runtime\mc\mods\` |
 | Ballance 侧 `Player.exe` + 插件 DLL | `tools/windows/rebuild-pt.cmd`（计划任务 `bmc-pt`）：configure → build → robocopy | `J:\bmc-project\runtime\{Bin,RenderEngines,…}` |
 
-当前构建（`fa443f0`）的 jar 是 **12,579,554 字节，md5 `66bfb7606154623f4e83e66e99e957c3`**。
+当前构建（`2ef805b`）的 jar 是 **12,581,522 字节，md5 `2ffd92b70e2f6faa03550c7cc34784f8`**。
+2026-11-13 这份只在开发机构建并跑过 Linux 冒烟，**还没有铺到 128 上**（当时那台不可达），
+盘上仍是 11-08 的 `66bfb760…`。
 
 `rebuild-pt.cmd` 只把 `.exe`/`.dll` 拷进运行目录，**不碰** `Player.ini` / `Minecraft.ini` /
 日志，所以重编不会丢你面板里的设置。注意按仓库作者自己的说明：**渲染器是插件不是主程序**，
